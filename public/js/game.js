@@ -557,7 +557,6 @@ function useAbility(key) {
       if (typeof socket !== 'undefined' && socket.emit) {
         socket.emit('projectile-spawn', { projectiles: [{ x: lp.x, y: lp.y, vx: cvx, vy: cvy, timer: 999, type: 'card' }] });
       }
-      showPopup('🎲 Gamble: ' + Math.round(dmg) + ' DMG!');
       // Clear small blind when using another move
       if (lp.blindBuff === 'small') lp.blindBuff = null;
       lp.effects.push({ type: 'gamble', timer: 0.5 });
@@ -648,7 +647,6 @@ function useAbility(key) {
       const options = [0, 100, 200, 300, 400];
       lp.chipChangeDmg = options[Math.floor(Math.random() * options.length)];
       lp.chipChangeTimer = abil.duration || 30;
-      showPopup('♠ Chip Change: M1 → ' + lp.chipChangeDmg + ' DMG!');
       // Clear small blind when using another move
       if (lp.blindBuff === 'small') lp.blindBuff = null;
       lp.effects.push({ type: 'chip-change', timer: 1.5 });
@@ -1252,6 +1250,9 @@ function renderGame() {
   // Draw HP in top-left corner
   drawTopRightHP();
 
+  // Draw active effects log at center top
+  drawEffectLog();
+
   // Update HUD
   updateHUD();
 }
@@ -1273,49 +1274,58 @@ function drawTopRightHP() {
   gameCtx.fillText(text, 22, 38);
   gameCtx.fillStyle = hpColor;
   gameCtx.fillText(text, 20, 36);
+  gameCtx.restore();
+}
 
-  // Active effects log (Poker blind/chip change, Fighter support/intimidation)
-  let logY = 60;
-  gameCtx.font = 'bold 12px "Press Start 2P", monospace';
+function drawEffectLog() {
+  if (!localPlayer) return;
+  const lp = localPlayer;
+  const cw = gameCanvas.width;
+
+  // Draw centered at top, below zone timer
+  gameCtx.save();
+  gameCtx.font = 'bold 13px "Press Start 2P", monospace';
+  gameCtx.textAlign = 'center';
+  let logY = 56;
   if (lp.blindBuff === 'small') {
     gameCtx.fillStyle = '#000';
-    gameCtx.fillText('🛡 Small Blind (½ dmg taken)', 22, logY + 1);
+    gameCtx.fillText('🛡 Small Blind (½ dmg taken)', cw / 2 + 1, logY + 1);
     gameCtx.fillStyle = '#64c8ff';
-    gameCtx.fillText('🛡 Small Blind (½ dmg taken)', 20, logY);
-    logY += 18;
+    gameCtx.fillText('🛡 Small Blind (½ dmg taken)', cw / 2, logY);
+    logY += 20;
   } else if (lp.blindBuff === 'big' && lp.blindTimer > 0) {
     gameCtx.fillStyle = '#000';
-    gameCtx.fillText('⚠ Big Blind 1.5× ' + Math.ceil(lp.blindTimer) + 's', 22, logY + 1);
+    gameCtx.fillText('⚠ Big Blind 1.5× ' + Math.ceil(lp.blindTimer) + 's', cw / 2 + 1, logY + 1);
     gameCtx.fillStyle = '#ff5050';
-    gameCtx.fillText('⚠ Big Blind 1.5× ' + Math.ceil(lp.blindTimer) + 's', 20, logY);
-    logY += 18;
+    gameCtx.fillText('⚠ Big Blind 1.5× ' + Math.ceil(lp.blindTimer) + 's', cw / 2, logY);
+    logY += 20;
   } else if (lp.blindBuff === 'dealer') {
     gameCtx.fillStyle = '#000';
-    gameCtx.fillText('🎰 Dealer — Gamble reset!', 22, logY + 1);
+    gameCtx.fillText('🎰 Dealer — Gamble reset!', cw / 2 + 1, logY + 1);
     gameCtx.fillStyle = '#f5a623';
-    gameCtx.fillText('🎰 Dealer — Gamble reset!', 20, logY);
-    logY += 18;
+    gameCtx.fillText('🎰 Dealer — Gamble reset!', cw / 2, logY);
+    logY += 20;
   }
   if (lp.chipChangeDmg >= 0 && lp.chipChangeTimer > 0) {
     gameCtx.fillStyle = '#000';
-    gameCtx.fillText('♠ Chips→' + lp.chipChangeDmg + ' ' + Math.ceil(lp.chipChangeTimer) + 's', 22, logY + 1);
+    gameCtx.fillText('♠ Chips→' + lp.chipChangeDmg + ' ' + Math.ceil(lp.chipChangeTimer) + 's', cw / 2 + 1, logY + 1);
     gameCtx.fillStyle = '#f5a623';
-    gameCtx.fillText('♠ Chips→' + lp.chipChangeDmg + ' ' + Math.ceil(lp.chipChangeTimer) + 's', 20, logY);
-    logY += 18;
+    gameCtx.fillText('♠ Chips→' + lp.chipChangeDmg + ' ' + Math.ceil(lp.chipChangeTimer) + 's', cw / 2, logY);
+    logY += 20;
   }
   if (lp.supportBuff > 0) {
     gameCtx.fillStyle = '#000';
-    gameCtx.fillText('💪 Support ' + Math.ceil(lp.supportBuff) + 's', 22, logY + 1);
+    gameCtx.fillText('💪 Support ' + Math.ceil(lp.supportBuff) + 's', cw / 2 + 1, logY + 1);
     gameCtx.fillStyle = '#2ecc71';
-    gameCtx.fillText('💪 Support ' + Math.ceil(lp.supportBuff) + 's', 20, logY);
-    logY += 18;
+    gameCtx.fillText('💪 Support ' + Math.ceil(lp.supportBuff) + 's', cw / 2, logY);
+    logY += 20;
   }
   if (lp.intimidated > 0) {
     gameCtx.fillStyle = '#000';
-    gameCtx.fillText('😨 Intimidated ' + Math.ceil(lp.intimidated) + 's', 22, logY + 1);
+    gameCtx.fillText('😨 Intimidated ' + Math.ceil(lp.intimidated) + 's', cw / 2 + 1, logY + 1);
     gameCtx.fillStyle = '#9b59b6';
-    gameCtx.fillText('😨 Intimidated ' + Math.ceil(lp.intimidated) + 's', 20, logY);
-    logY += 18;
+    gameCtx.fillText('😨 Intimidated ' + Math.ceil(lp.intimidated) + 's', cw / 2, logY);
+    logY += 20;
   }
   gameCtx.restore();
 }
