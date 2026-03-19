@@ -37,6 +37,7 @@ let lastWallClock = 0;  // wall-clock ms for background-tab-safe dt
 
 // Projectile system
 let projectiles = [];  // [{x, y, vx, vy, ownerId, damage, speed, timer, type}]
+let combatLog = [];    // [{text, timer, color}]
 
 // ═══════════════════════════════════════════════════════════════
 // START GAME
@@ -93,6 +94,7 @@ function startGame(mapIndex, players, myId) {
 
   // Reset projectiles
   projectiles = [];
+  combatLog = [];
 
   gamePlayers = players.map((p, i) => {
     const spawn = validSpawns[i % validSpawns.length];
@@ -346,6 +348,12 @@ function updateGame(dt) {
   // Update projectiles
   updateProjectiles(dt);
 
+  // Tick combat log
+  for (let i = combatLog.length - 1; i >= 0; i--) {
+    combatLog[i].timer -= dt;
+    if (combatLog[i].timer <= 0) combatLog.splice(i, 1);
+  }
+
   // M1 – auto-fire while mouse held
   if (mouseDown && localPlayer.cdM1 <= 0) {
     useAbility('M1');
@@ -446,6 +454,10 @@ function updateProjectiles(dt) {
         const dist = Math.sqrt(dx * dx + dy * dy);
         if (dist < radius + 4) {
           dealDamage(localPlayer, target, p.damage);
+          // Log gamble card hits
+          if (p.type === 'card') {
+            combatLog.push({ text: '🎲 Gamble hit ' + target.name + ' for ' + p.damage + '!', timer: 4, color: '#f5a623' });
+          }
           projectiles.splice(i, 1);
           break;
         }
@@ -644,7 +656,7 @@ function useAbility(key) {
 
     if (isPoker) {
       // Chip Change: randomize M1 damage for 30 seconds
-      const options = [0, 100, 200, 300, 400];
+      const options = [50, 100, 200, 300, 400];
       lp.chipChangeDmg = options[Math.floor(Math.random() * options.length)];
       lp.chipChangeTimer = abil.duration || 30;
       // Clear small blind when using another move
@@ -774,12 +786,23 @@ function dealDamage(attacker, target, amount) {
   target.healTickTimer = 0;
   target.effects.push({ type: 'hit', timer: 0.3 });
 
-  // Track damage taken for special unlock
+  // Track damage taken for special unlock (target's counter)
   target.totalDamageTaken += amount;
   if (!target.specialUnlocked && target.totalDamageTaken >= target.maxHp * 2) {
     target.specialUnlocked = true;
     if (target.id === localPlayerId) {
       showPopup('⚡ SPECIAL UNLOCKED! [SPACE]');
+    }
+  }
+
+  // Track damage dealt for attacker's special unlock too
+  if (attacker && attacker.alive) {
+    attacker.totalDamageTaken += amount;
+    if (!attacker.specialUnlocked && attacker.totalDamageTaken >= attacker.maxHp * 2) {
+      attacker.specialUnlocked = true;
+      if (attacker.id === localPlayerId) {
+        showPopup('⚡ SPECIAL UNLOCKED! [SPACE]');
+      }
     }
   }
 
@@ -991,12 +1014,12 @@ function renderGame() {
       const chipX = sx + Math.cos(chipAngle) * (radius + chipR * 0.3);
       const chipY = sy + Math.sin(chipAngle) * (radius + chipR * 0.3);
       // Chip body
-      gameCtx.fillStyle = '#f5a623';
+      gameCtx.fillStyle = '#222';
       gameCtx.beginPath();
       gameCtx.arc(chipX, chipY, chipR, 0, Math.PI * 2);
       gameCtx.fill();
       // Outer ring
-      gameCtx.strokeStyle = '#d4891a';
+      gameCtx.strokeStyle = '#555';
       gameCtx.lineWidth = 2;
       gameCtx.beginPath();
       gameCtx.arc(chipX, chipY, chipR, 0, Math.PI * 2);
@@ -1295,9 +1318,9 @@ function drawEffectLog() {
     logY += 20;
   } else if (lp.blindBuff === 'big' && lp.blindTimer > 0) {
     gameCtx.fillStyle = '#000';
-    gameCtx.fillText('⚠ Big Blind 1.5× ' + Math.ceil(lp.blindTimer) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillText('⚠ Big Blind: take 1.5× dmg ' + Math.ceil(lp.blindTimer) + 's', cw / 2 + 1, logY + 1);
     gameCtx.fillStyle = '#ff5050';
-    gameCtx.fillText('⚠ Big Blind 1.5× ' + Math.ceil(lp.blindTimer) + 's', cw / 2, logY);
+    gameCtx.fillText('⚠ Big Blind: take 1.5× dmg ' + Math.ceil(lp.blindTimer) + 's', cw / 2, logY);
     logY += 20;
   } else if (lp.blindBuff === 'dealer') {
     gameCtx.fillStyle = '#000';
@@ -1325,6 +1348,14 @@ function drawEffectLog() {
     gameCtx.fillText('😨 Intimidated ' + Math.ceil(lp.intimidated) + 's', cw / 2 + 1, logY + 1);
     gameCtx.fillStyle = '#9b59b6';
     gameCtx.fillText('😨 Intimidated ' + Math.ceil(lp.intimidated) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  for (let i = 0; i < combatLog.length; i++) {
+    const entry = combatLog[i];
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText(entry.text, cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = entry.color;
+    gameCtx.fillText(entry.text, cw / 2, logY);
     logY += 20;
   }
   gameCtx.restore();
