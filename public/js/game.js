@@ -245,6 +245,10 @@ function createPlayerState(p, spawn, fighter) {
     summonId: null,        // id of active companion entity
     boiledOneActive: false,// whether Boiled One is active
     boiledOneTimer: 0,     // seconds remaining until first stunned can move
+    // 1X1X1X1-specific state
+    poisonTimers: [],       // [{sourceId, dps, remaining}]
+    unstableEyeTimer: 0,    // seconds remaining of Unstable Eye
+    zombieIds: [],           // array of zombie summon ids
   };
 }
 
@@ -467,6 +471,31 @@ function updateGame(dt) {
         p.boiledOneTimer = 0;
       }
     }
+
+    // Tick poison timers
+    if (p.poisonTimers && p.poisonTimers.length > 0 && p.alive) {
+      for (let pi = p.poisonTimers.length - 1; pi >= 0; pi--) {
+        const pt = p.poisonTimers[pi];
+        const poisonDmg = pt.dps * wallDt;
+        p.hp -= poisonDmg;
+        p.noDamageTimer = 0;
+        p.isHealing = false;
+        p.healTickTimer = 0;
+        pt.remaining -= wallDt;
+        if (pt.remaining <= 0) p.poisonTimers.splice(pi, 1);
+      }
+      if (p.hp <= 0 && p.alive) {
+        p.hp = 0;
+        p.alive = false;
+        p.effects.push({ type: 'death', timer: 2 });
+        if (p.id === localPlayerId) { freeCamX = p.x; freeCamY = p.y; spectateIndex = -1; }
+      }
+    }
+
+    // Tick Unstable Eye timer
+    if (p.unstableEyeTimer > 0) {
+      p.unstableEyeTimer = Math.max(0, p.unstableEyeTimer - wallDt);
+    }
   }
 
   // Update summon AI
@@ -577,6 +606,8 @@ function updateMovement(dt) {
   }
 
   let speed = localPlayer.fighter.speed;
+  // Unstable Eye: 30% speed boost
+  if (localPlayer.unstableEyeTimer > 0) speed *= 1.3;
   // Intimidation: move 1.5× faster when moving AWAY from intimidator
   if (localPlayer.intimidated > 0 && localPlayer.intimidatedBy) {
     const src = gamePlayers.find((p) => p.id === localPlayer.intimidatedBy);
@@ -650,6 +681,31 @@ function updateProjectiles(dt) {
           // Log gamble card hits
           if (p.type === 'card') {
             combatLog.push({ text: '🎲 Gamble hit ' + target.name + ' for ' + p.damage + '!', timer: 4, color: '#f5a623' });
+          }
+          // Entanglement: stun + drag toward owner
+          if (p.type === 'entangle' && owner) {
+            const stunDur = p.stunDuration || 1.5;
+            target.stunned = stunDur;
+            target.effects.push({ type: 'stun', timer: stunDur });
+            // Drag target toward the owner
+            const dragDist = (p.dragDistance || 3) * GAME_TILE;
+            const ddx = owner.x - target.x; const ddy = owner.y - target.y;
+            const dDist = Math.sqrt(ddx * ddx + ddy * ddy) || 1;
+            const dragNx = ddx / dDist; const dragNy = ddy / dDist;
+            const actualDrag = Math.min(dragDist, dDist - GAME_TILE * PLAYER_RADIUS_RATIO * 2);
+            if (actualDrag > 0) {
+              const r = GAME_TILE * PLAYER_RADIUS_RATIO;
+              for (let s = 10; s >= 1; s--) {
+                const tryX = target.x + dragNx * actualDrag * (s / 10);
+                const tryY = target.y + dragNy * actualDrag * (s / 10);
+                if (canMoveTo(tryX, tryY, r)) { target.x = tryX; target.y = tryY; break; }
+              }
+            }
+            if (typeof socket !== 'undefined' && socket.emit) {
+              socket.emit('player-knockback', { targetId: target.id, x: target.x, y: target.y });
+              socket.emit('player-debuff', { targetId: target.id, type: 'stun', duration: stunDur });
+            }
+            combatLog.push({ text: '⚔ Entangled ' + target.name + '!', timer: 3, color: '#00ff66' });
           }
           projectiles.splice(i, 1);
           break;
@@ -733,6 +789,24 @@ function updateSummons(dt) {
           bestTarget.effects.push({ type: 'stun', timer: s.summonStunDur });
           s.summonAttackTimer = s.summonAttackCD;
           s.effects.push({ type: 'chair-swing', timer: 0.2, aimNx: nx, aimNy: ny });
+        }
+      }
+    } else if (s.summonType === 'zombie') {
+      // Zombie: medium speed, melee slash only
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const speed = s.summonSpeed;
+        const nx = dx / dist; const ny = dy / dist;
+        const newX = s.x + nx * speed;
+        const newY = s.y + ny * speed;
+        if (canMoveTo(newX, s.y, radius)) s.x = newX;
+        if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        // Slash attack within melee range
+        if (bestDist < GAME_TILE * 1.5 && s.summonAttackTimer <= 0) {
+          dealDamage(owner || s, bestTarget, s.summonDamage);
+          s.summonAttackTimer = s.summonAttackCD;
+          s.effects.push({ type: 'zombie-slash', timer: 0.2, aimNx: nx, aimNy: ny });
         }
       }
     }
@@ -888,6 +962,8 @@ function cpuMove(cpu, dt, params) {
   const ai = cpu.aiState;
   const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
   let speed = cpu.fighter.speed;
+  // Unstable Eye: 30% speed boost
+  if (cpu.unstableEyeTimer > 0) speed *= 1.3;
 
   // Retreat if low HP
   ai.retreating = cpu.hp / cpu.maxHp < params.retreatHp;
@@ -998,6 +1074,7 @@ function cpuAttack(cpu, params) {
   const fighter = cpu.fighter;
   const isPoker = fighter.id === 'poker';
   const isFilbus = fighter.id === 'filbus';
+  const is1x = fighter.id === 'onexonexonex';
 
   // Add aim error based on difficulty
   const errorAngle = (Math.random() - 0.5) * params.aimError * 2;
@@ -1022,6 +1099,9 @@ function cpuAttack(cpu, params) {
       // Boiled One: use when enemies nearby
       cpuUseSpecialFilbus(cpu);
       return;
+    } else if (is1x) {
+      cpuUseSpecial1x(cpu);
+      return;
     } else {
       if (dist < 10 * GAME_TILE) {
         cpuUseSpecialFighter(cpu, target);
@@ -1042,6 +1122,12 @@ function cpuAttack(cpu, params) {
       if (dist > 4 * GAME_TILE && cpu.chairCharges <= 0 && !cpu.isCraftingChair) {
         cpu.isCraftingChair = true;
         cpu.craftTimer = fighter.abilities[1].channelTime || 10;
+        return;
+      }
+    } else if (is1x) {
+      // Entanglement: throw swords if in range
+      if (dist < 8 * GAME_TILE) {
+        cpu1xEntangle(cpu, target, aimAngle);
         return;
       }
     } else {
@@ -1069,6 +1155,12 @@ function cpuAttack(cpu, params) {
         cpu.eatTimer = fighter.abilities[2].channelTime || 3;
         cpu.eatHealPool = fighter.abilities[2].healAmount || 100;
         cpu.chairCharges--;
+        return;
+      }
+    } else if (is1x) {
+      // Mass Infection: wide attack when enemies nearby
+      if (dist < (fighter.abilities[2].range || 4) * GAME_TILE) {
+        cpu1xMassInfection(cpu, target, aimNx, aimNy);
         return;
       }
     } else {
@@ -1115,6 +1207,7 @@ function cpuAttack(cpu, params) {
           chairCharges: 0, isCraftingChair: false, craftTimer: 0,
           isEatingChair: false, eatTimer: 0, eatHealPool: 0,
           summonId: null, boiledOneActive: false, boiledOneTimer: 0,
+          poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
           isSummon: true, summonOwner: cpu.id, summonType: pick,
           summonSpeed: compDef.speed, summonDamage: compDef.damage,
           summonStunDur: compDef.stunDuration, summonAttackCD: compDef.attackCooldown,
@@ -1127,6 +1220,14 @@ function cpuAttack(cpu, params) {
         gamePlayers.push(summon);
         cpu.summonId = summonId;
         cpu.effects.push({ type: 'summon', timer: 1.5 });
+        return;
+      }
+    } else if (is1x) {
+      // Unstable Eye: use when enemy is nearby
+      if (cpu.unstableEyeTimer <= 0 && dist < 6 * GAME_TILE) {
+        cpu.cdT = fighter.abilities[3].cooldown;
+        cpu.unstableEyeTimer = fighter.abilities[3].duration || 6;
+        cpu.effects.push({ type: 'unstable-eye', timer: fighter.abilities[3].duration || 6 });
         return;
       }
     } else {
@@ -1157,6 +1258,11 @@ function cpuAttack(cpu, params) {
       // Chair swing
       if (dist < (fighter.abilities[0].range || 1.8) * GAME_TILE) {
         cpuChairSwing(cpu, target, aimNx, aimNy);
+      }
+    } else if (is1x) {
+      // 1x Slash
+      if (dist < (fighter.abilities[0].range || 1.5) * GAME_TILE) {
+        cpu1xSlash(cpu, target, aimNx, aimNy);
       }
     } else {
       if (dist < fighter.abilities[0].range * GAME_TILE) {
@@ -1360,6 +1466,123 @@ function cpuUseSpecialFilbus(cpu) {
   cpu.effects.push({ type: 'boiled-one', timer: stunDur + 1 });
 }
 
+function cpu1xSlash(cpu, target, aimNx, aimNy) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[0];
+  cpu.cdM1 = abil.cooldown;
+  const range = (abil.range || 1.5) * GAME_TILE;
+  let baseDmg = abil.damage;
+  if (cpu.supportBuff > 0) baseDmg *= 1.5;
+  if (cpu.intimidated > 0) baseDmg *= 0.5;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    if (t.isSummon && t.summonOwner === cpu.id) continue;
+    const dx = t.x - cpu.x; const dy = t.y - cpu.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > range) continue;
+    const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+    if (dot < 0) continue;
+    dealDamage(cpu, t, baseDmg);
+    if (!t.poisonTimers) t.poisonTimers = [];
+    t.poisonTimers.push({ sourceId: cpu.id, dps: abil.poisonDPS || 50, remaining: abil.poisonDuration || 3 });
+    t.effects.push({ type: 'poison', timer: abil.poisonDuration || 3 });
+  }
+  cpu.effects.push({ type: 'slash-1x', timer: 0.2, aimNx, aimNy });
+}
+
+function cpu1xEntangle(cpu, target, aimAngle) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[1];
+  cpu.cdE = abil.cooldown;
+  const spd = (abil.projectileSpeed || 25) * GAME_TILE / 10;
+  const evx = Math.cos(aimAngle) * spd;
+  const evy = Math.sin(aimAngle) * spd;
+  projectiles.push({
+    x: cpu.x, y: cpu.y, vx: evx, vy: evy,
+    ownerId: cpu.id, damage: abil.damage,
+    timer: 1.5, type: 'entangle',
+    stunDuration: abil.stunDuration || 1.5,
+    dragDistance: abil.dragDistance || 3,
+  });
+  cpu.effects.push({ type: 'entangle-cast', timer: 0.5 });
+}
+
+function cpu1xMassInfection(cpu, target, aimNx, aimNy) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[2];
+  cpu.cdR = abil.cooldown;
+  const range = (abil.range || 4) * GAME_TILE;
+  let baseDmg = abil.damage;
+  if (cpu.supportBuff > 0) baseDmg *= 1.5;
+  if (cpu.intimidated > 0) baseDmg *= 0.5;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    if (t.isSummon && t.summonOwner === cpu.id) continue;
+    const dx = t.x - cpu.x; const dy = t.y - cpu.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > range) continue;
+    const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+    if (dot < -0.1) continue;
+    dealDamage(cpu, t, baseDmg);
+    if (!t.poisonTimers) t.poisonTimers = [];
+    t.poisonTimers.push({ sourceId: cpu.id, dps: abil.poisonDPS || 50, remaining: abil.poisonDuration || 3 });
+    t.effects.push({ type: 'poison', timer: abil.poisonDuration || 3 });
+  }
+  cpu.effects.push({ type: 'mass-infection', timer: 0.6, aimNx, aimNy });
+}
+
+function cpuUseSpecial1x(cpu) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[4];
+  cpu.specialUsed = true;
+  let deadCount = 0;
+  for (const p of gamePlayers) {
+    if (!p.alive && !p.isSummon) deadCount++;
+  }
+  const zombieCount = (abil.baseZombies || 5) + deadCount;
+  // Clear old zombies
+  for (let zi = gamePlayers.length - 1; zi >= 0; zi--) {
+    if (gamePlayers[zi].isSummon && gamePlayers[zi].summonType === 'zombie' && gamePlayers[zi].summonOwner === cpu.id) {
+      gamePlayers.splice(zi, 1);
+    }
+  }
+  cpu.zombieIds = [];
+  for (let z = 0; z < zombieCount; z++) {
+    const zombieId = 'zombie-' + cpu.id + '-' + Date.now() + '-' + z;
+    let zx, zy;
+    for (let attempts = 0; attempts < 50; attempts++) {
+      zx = (Math.floor(Math.random() * gameMap.cols) + 0.5) * GAME_TILE;
+      zy = (Math.floor(Math.random() * gameMap.rows) + 0.5) * GAME_TILE;
+      if (canMoveTo(zx, zy, GAME_TILE * PLAYER_RADIUS_RATIO)) break;
+    }
+    const zombie = {
+      id: zombieId, name: 'Zombie', color: '#1a5c1a',
+      x: zx, y: zy,
+      hp: abil.zombieHp || 500, maxHp: abil.zombieHp || 500,
+      fighter: fighter, alive: true,
+      cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
+      totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+      supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+      noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+      specialJumping: false, specialAiming: false,
+      specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+      effects: [],
+      blindBuff: null, blindTimer: 0, chipChangeDmg: -1, chipChangeTimer: 0,
+      chairCharges: 0, isCraftingChair: false, craftTimer: 0,
+      isEatingChair: false, eatTimer: 0, eatHealPool: 0,
+      summonId: null, boiledOneActive: false, boiledOneTimer: 0,
+      poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
+      isSummon: true, summonOwner: cpu.id, summonType: 'zombie',
+      summonSpeed: abil.zombieSpeed || 2.0,
+      summonDamage: abil.zombieDamage || 100,
+      summonStunDur: 0, summonAttackCD: 1.0, summonAttackTimer: 0,
+    };
+    gamePlayers.push(zombie);
+    cpu.zombieIds.push(zombieId);
+  }
+  cpu.effects.push({ type: 'rejuvenate', timer: 2.0 });
+}
+
 // ═══════════════════════════════════════════════════════════════
 // ABILITIES
 // ═══════════════════════════════════════════════════════════════
@@ -1371,6 +1594,7 @@ function useAbility(key) {
   const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
   const isPoker = fighter.id === 'poker';
   const isFilbus = fighter.id === 'filbus';
+  const is1x = fighter.id === 'onexonexonex';
 
   // Filbus: channeling interrupts
   if (isFilbus && (key !== 'E' && key !== 'R')) {
@@ -1445,6 +1669,33 @@ function useAbility(key) {
       } else {
         lp.effects.push({ type: 'chair-swing', timer: 0.2, aimNx, aimNy });
       }
+    } else if (is1x) {
+      // 1X1X1X1: Slash — melee + poison
+      const range = (abil.range || 1.5) * GAME_TILE;
+      let baseDmg = abil.damage;
+      if (lp.supportBuff > 0) baseDmg *= 1.5;
+      if (lp.intimidated > 0) baseDmg *= 0.5;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > range) continue;
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < 0) continue;
+        dealDamage(lp, target, baseDmg);
+        // Apply poison
+        if (!target.poisonTimers) target.poisonTimers = [];
+        target.poisonTimers.push({ sourceId: lp.id, dps: abil.poisonDPS || 50, remaining: abil.poisonDuration || 3 });
+        target.effects.push({ type: 'poison', timer: abil.poisonDuration || 3 });
+      }
+      lp.effects.push({ type: 'slash-1x', timer: 0.2, aimNx, aimNy });
     } else {
       // Fighter: Sword (original M1)
       const range = abil.range * GAME_TILE;
@@ -1522,6 +1773,28 @@ function useAbility(key) {
         combatLog.push({ text: '🪑 Crafting a chair...', timer: 2, color: '#c8a96e' });
         lp.effects.push({ type: 'crafting', timer: (abil.channelTime || 10) + 0.5 });
       }
+    } else if (is1x) {
+      // 1X1X1X1 E: Entanglement — throw swords in a line, stun + drag target
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const angle = Math.atan2(aimDy, aimDx);
+      const spd = (abil.projectileSpeed || 25) * GAME_TILE / 10;
+      const evx = Math.cos(angle) * spd;
+      const evy = Math.sin(angle) * spd;
+      projectiles.push({
+        x: lp.x, y: lp.y, vx: evx, vy: evy,
+        ownerId: lp.id, damage: abil.damage,
+        timer: 1.5, type: 'entangle',
+        stunDuration: abil.stunDuration || 1.5,
+        dragDistance: abil.dragDistance || 3,
+      });
+      if (typeof socket !== 'undefined' && socket.emit) {
+        socket.emit('projectile-spawn', { projectiles: [{ x: lp.x, y: lp.y, vx: evx, vy: evy, timer: 1.5, type: 'entangle' }] });
+      }
+      lp.effects.push({ type: 'entangle-cast', timer: 0.5 });
+      combatLog.push({ text: '⚔ Entanglement!', timer: 2, color: '#00ff66' });
     } else {
       // Fighter: Support buff
       lp.supportBuff = abil.duration;
@@ -1585,6 +1858,35 @@ function useAbility(key) {
         combatLog.push({ text: '🪑 Eating a chair... (' + lp.chairCharges + ' left)', timer: 2, color: '#2ecc71' });
         lp.effects.push({ type: 'eating', timer: (abil.channelTime || 3) + 0.5 });
       }
+    } else if (is1x) {
+      // 1X1X1X1 R: Mass Infection — wide horizontal shockwave + poison
+      const range = (abil.range || 4) * GAME_TILE;
+      let baseDmg = abil.damage;
+      if (lp.supportBuff > 0) baseDmg *= 1.5;
+      if (lp.intimidated > 0) baseDmg *= 0.5;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > range) continue;
+        // Wide angle — 180 degrees (dot product >= -0.1)
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < -0.1) continue;
+        dealDamage(lp, target, baseDmg);
+        // Apply poison
+        if (!target.poisonTimers) target.poisonTimers = [];
+        target.poisonTimers.push({ sourceId: lp.id, dps: abil.poisonDPS || 50, remaining: abil.poisonDuration || 3 });
+        target.effects.push({ type: 'poison', timer: abil.poisonDuration || 3 });
+      }
+      lp.effects.push({ type: 'mass-infection', timer: 0.6, aimNx, aimNy });
+      combatLog.push({ text: '☣ Mass Infection!', timer: 3, color: '#00ff66' });
     } else {
       // Fighter: Power Swing
       const range = abil.range * GAME_TILE;
@@ -1675,6 +1977,7 @@ function useAbility(key) {
           chairCharges: 0, isCraftingChair: false, craftTimer: 0,
           isEatingChair: false, eatTimer: 0, eatHealPool: 0,
           summonId: null, boiledOneActive: false, boiledOneTimer: 0,
+          poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
           // Summon-specific
           isSummon: true,
           summonOwner: lp.id,
@@ -1695,6 +1998,12 @@ function useAbility(key) {
         combatLog.push({ text: '🔮 Summoned ' + compDef.name + '!', timer: 3, color: '#d4af37' });
         lp.effects.push({ type: 'summon', timer: 1.5 });
       }
+    } else if (is1x) {
+      // 1X1X1X1 T: Unstable Eye — speed boost + reveal all enemies + blur
+      lp.unstableEyeTimer = abil.duration || 6;
+      lp.effects.push({ type: 'unstable-eye', timer: abil.duration || 6 });
+      combatLog.push({ text: '👁 Unstable Eye activated!', timer: 3, color: '#00ff66' });
+      showPopup('👁 UNSTABLE EYE');
     } else {
       // Fighter: Intimidation
       const sightRange = CAMERA_RANGE * GAME_TILE * 2;
@@ -1781,6 +2090,62 @@ function useAbility(key) {
       showPopup('🩸 THE BOILED ONE PHENOMENON');
       lp.effects.push({ type: 'boiled-one', timer: stunDur + 1 });
       combatLog.push({ text: '🩸 Phen 228 has entered...', timer: 5, color: '#8b0000' });
+    } else if (is1x) {
+      // 1X1X1X1 SPACE: Rejuvenate the Rotten — summon zombies
+      lp.specialUsed = true;
+      const abil = fighter.abilities[4];
+      // Count dead players
+      let deadCount = 0;
+      for (const p of gamePlayers) {
+        if (!p.alive && !p.isSummon) deadCount++;
+      }
+      const zombieCount = (abil.baseZombies || 5) + deadCount;
+      // Clear old zombies
+      for (let zi = gamePlayers.length - 1; zi >= 0; zi--) {
+        if (gamePlayers[zi].isSummon && gamePlayers[zi].summonType === 'zombie' && gamePlayers[zi].summonOwner === lp.id) {
+          gamePlayers.splice(zi, 1);
+        }
+      }
+      lp.zombieIds = [];
+      // Spawn zombies at random positions on the map
+      for (let z = 0; z < zombieCount; z++) {
+        const zombieId = 'zombie-' + lp.id + '-' + Date.now() + '-' + z;
+        // Random walkable position
+        let zx, zy;
+        for (let attempts = 0; attempts < 50; attempts++) {
+          zx = (Math.floor(Math.random() * gameMap.cols) + 0.5) * GAME_TILE;
+          zy = (Math.floor(Math.random() * gameMap.rows) + 0.5) * GAME_TILE;
+          if (canMoveTo(zx, zy, GAME_TILE * PLAYER_RADIUS_RATIO)) break;
+        }
+        const zombie = {
+          id: zombieId, name: 'Zombie', color: '#1a5c1a',
+          x: zx, y: zy,
+          hp: abil.zombieHp || 500, maxHp: abil.zombieHp || 500,
+          fighter: fighter, alive: true,
+          cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
+          totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+          supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+          noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+          specialJumping: false, specialAiming: false,
+          specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+          effects: [],
+          blindBuff: null, blindTimer: 0, chipChangeDmg: -1, chipChangeTimer: 0,
+          chairCharges: 0, isCraftingChair: false, craftTimer: 0,
+          isEatingChair: false, eatTimer: 0, eatHealPool: 0,
+          summonId: null, boiledOneActive: false, boiledOneTimer: 0,
+          poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
+          // Summon-specific
+          isSummon: true, summonOwner: lp.id, summonType: 'zombie',
+          summonSpeed: abil.zombieSpeed || 2.0,
+          summonDamage: abil.zombieDamage || 100,
+          summonStunDur: 0, summonAttackCD: 1.0, summonAttackTimer: 0,
+        };
+        gamePlayers.push(zombie);
+        lp.zombieIds.push(zombieId);
+      }
+      showPopup('🧟 REJUVENATE THE ROTTEN!');
+      lp.effects.push({ type: 'rejuvenate', timer: 2.0 });
+      combatLog.push({ text: '🧟 Summoned ' + zombieCount + ' zombies!', timer: 4, color: '#1a5c1a' });
     } else {
       // Fighter: Special jump
       lp.specialJumping = true;
@@ -2193,6 +2558,25 @@ function renderGame() {
         gameCtx.beginPath();
         gameCtx.arc(sx, sy - h * 0.15, 5, 0, Math.PI * 2);
         gameCtx.fill();
+      } else if (p.summonType === 'zombie') {
+        // Dark green circle for zombie
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#1a5c1a';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.9, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#0a3a0a';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 0.9, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Zombie eyes — two small dots
+        gameCtx.fillStyle = '#88ff44';
+        gameCtx.beginPath();
+        gameCtx.arc(sx - 3, sy - 2, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.arc(sx + 3, sy - 2, 1.5, 0, Math.PI * 2);
+        gameCtx.fill();
       }
     } else {
       // Normal player dot
@@ -2270,6 +2654,40 @@ function renderGame() {
       // Summon indicator dot if summon active
       if (p.summonId) {
         gameCtx.fillStyle = '#d4af37';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    } else if (p.fighter && p.fighter.id === 'onexonexonex') {
+      // 1X1X1X1: Eye on dot + neon green streaks
+      // Glowing neon green eye in center
+      gameCtx.fillStyle = '#00ff66';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, 3.5, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = 'rgba(0, 255, 102, 0.3)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, 6, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Pupil
+      gameCtx.fillStyle = '#000';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, 1.5, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Neon green streaks radiating from the dot
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - 2, sy - radius * 0.6);
+      gameCtx.lineTo(sx - 4, sy + radius * 0.4);
+      gameCtx.moveTo(sx + 3, sy - radius * 0.5);
+      gameCtx.lineTo(sx + 1, sy + radius * 0.5);
+      gameCtx.moveTo(sx, sy - radius * 0.3);
+      gameCtx.lineTo(sx - 2, sy + radius * 0.6);
+      gameCtx.stroke();
+      // Zombie indicator if zombies active
+      if (p.zombieIds && p.zombieIds.length > 0) {
+        gameCtx.fillStyle = '#1a5c1a';
         gameCtx.beginPath();
         gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
         gameCtx.fill();
@@ -2511,6 +2929,76 @@ function renderGame() {
       gameCtx.fillText('🩸BOILED ' + Math.ceil(p.boiledOneTimer) + 's', sx, sy - radius - 26);
     }
 
+    // 1X1X1X1: Slash arc effect (neon green)
+    const slashFx = p.effects.find((fx) => fx.type === 'slash-1x');
+    if (slashFx) {
+      const swLen = GAME_TILE * 1.3;
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(slashFx.aimNy, slashFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.5, aRad + 0.5);
+      gameCtx.stroke();
+    }
+
+    // 1X1X1X1: Mass Infection green shockwave
+    const miFx = p.effects.find((fx) => fx.type === 'mass-infection');
+    if (miFx) {
+      const waveR = GAME_TILE * 4;
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 5;
+      const aRad = Math.atan2(miFx.aimNy, miFx.aimNx);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, waveR, aRad - Math.PI / 2, aRad + Math.PI / 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = 'rgba(0, 255, 102, 0.12)';
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      gameCtx.arc(sx, sy, waveR, aRad - Math.PI / 2, aRad + Math.PI / 2);
+      gameCtx.closePath();
+      gameCtx.fill();
+    }
+
+    // 1X1X1X1: Zombie slash effect (dark green arc)
+    const zombieSlashFx = p.effects.find((fx) => fx.type === 'zombie-slash');
+    if (zombieSlashFx) {
+      const swLen = GAME_TILE * 1.2;
+      gameCtx.strokeStyle = '#1a5c1a';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(zombieSlashFx.aimNy, zombieSlashFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.4, aRad + 0.4);
+      gameCtx.stroke();
+    }
+
+    // Poison visual: green ring when poisoned
+    if (p.poisonTimers && p.poisonTimers.length > 0 && p.alive) {
+      gameCtx.strokeStyle = 'rgba(0, 255, 102, 0.7)';
+      gameCtx.lineWidth = 2;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#00ff66';
+      gameCtx.font = 'bold 8px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('☣ POISON', sx, sy - radius - 8);
+    }
+
+    // Unstable Eye: speed indicator
+    if (p.unstableEyeTimer > 0) {
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 3;
+      gameCtx.setLineDash([4, 4]);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      gameCtx.fillStyle = '#00ff66';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('👁 EYE ' + Math.ceil(p.unstableEyeTimer) + 's', sx, sy - radius - 18);
+    }
+
     // Summon-specific rendering
     if (p.isSummon) {
       // Tether line to owner
@@ -2560,6 +3048,26 @@ function renderGame() {
       gameCtx.textBaseline = 'middle';
       gameCtx.fillText('♠', 0, 0);
       gameCtx.restore();
+    } else if (proj.type === 'entangle') {
+      // Neon green spinning swords
+      gameCtx.save();
+      const angle = Math.atan2(proj.vy, proj.vx) + (Date.now() / 100);
+      gameCtx.translate(px, py);
+      gameCtx.rotate(angle);
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 2.5;
+      gameCtx.beginPath();
+      gameCtx.moveTo(-10, 0);
+      gameCtx.lineTo(10, 0);
+      gameCtx.moveTo(0, -10);
+      gameCtx.lineTo(0, 10);
+      gameCtx.stroke();
+      // Glow
+      gameCtx.fillStyle = 'rgba(0, 255, 102, 0.3)';
+      gameCtx.beginPath();
+      gameCtx.arc(0, 0, 8, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.restore();
     }
   }
 
@@ -2579,6 +3087,31 @@ function renderGame() {
       gameCtx.fillStyle = 'rgba(0, 0, 0, ' + alpha + ')';
       gameCtx.beginPath();
       gameCtx.arc(px, py, r, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+  }
+
+  // Unstable Eye overlay: blur + green outlines on all enemies
+  if (localPlayer && localPlayer.unstableEyeTimer > 0) {
+    // 60% blur overlay
+    gameCtx.fillStyle = 'rgba(0, 40, 0, 0.15)';
+    gameCtx.fillRect(0, 0, cw, ch);
+    // Green outlines on all enemy players (reveal effect)
+    for (const p of gamePlayers) {
+      if (p.id === localPlayerId || !p.alive) continue;
+      if (p.isSummon && p.summonOwner === localPlayerId) continue;
+      const ex = p.x - camX;
+      const ey = p.y - camY;
+      if (ex < -100 || ex > cw + 100 || ey < -100 || ey > ch + 100) continue;
+      const r = GAME_TILE * PLAYER_RADIUS_RATIO;
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(ex, ey, r + 8, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = 'rgba(0, 255, 102, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(ex, ey, r + 8, 0, Math.PI * 2);
       gameCtx.fill();
     }
   }
