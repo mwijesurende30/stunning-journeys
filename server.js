@@ -158,15 +158,17 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Relay damage events from attacker to all clients
+  // Relay damage events from attacker to all clients (with validation)
   socket.on('player-damage', ({ targetId, amount, attackerId }) => {
-    if (socket.lobbyCode) {
-      socket.to(socket.lobbyCode).emit('player-damaged', {
-        targetId,
-        amount,
-        attackerId: socket.id,
-      });
-    }
+    if (!socket.lobbyCode) return;
+    // Validate damage: must be a positive number, cap at 1000 per hit
+    if (typeof amount !== 'number' || amount <= 0 || !isFinite(amount)) return;
+    const clampedAmount = Math.min(amount, 1000);
+    socket.to(socket.lobbyCode).emit('player-damaged', {
+      targetId,
+      amount: clampedAmount,
+      attackerId: socket.id,
+    });
   });
 
   // Relay knockback
@@ -233,12 +235,14 @@ io.on('connection', (socket) => {
   });
 
   socket.on('projectile-spawn', (data) => {
-    if (socket.lobbyCode) {
-      socket.to(socket.lobbyCode).emit('projectile-spawned', {
-        ownerId: socket.id,
-        projectiles: data.projectiles, // [{x,y,vx,vy,timer,type}]
-      });
-    }
+    if (!socket.lobbyCode) return;
+    // Validate: must be an array, cap at 10 projectiles per message
+    if (!Array.isArray(data.projectiles)) return;
+    const clamped = data.projectiles.slice(0, 10);
+    socket.to(socket.lobbyCode).emit('projectile-spawned', {
+      ownerId: socket.id,
+      projectiles: clamped,
+    });
   });
 
   socket.on('player-debuff', ({ targetId, type, duration }) => {

@@ -235,6 +235,16 @@ function createPlayerState(p, spawn, fighter) {
     blindTimer: 0,         // seconds remaining for big blind
     chipChangeDmg: -1,     // -1 = normal, else 0/100/200/300/400
     chipChangeTimer: 0,    // seconds remaining
+    // Filbus-specific state
+    chairCharges: 0,       // number of crafted chairs
+    isCraftingChair: false,// currently channeling Filbism (1)
+    craftTimer: 0,         // seconds remaining on craft channel
+    isEatingChair: false,  // currently channeling Filbism (2)
+    eatTimer: 0,           // seconds remaining on eat channel
+    eatHealPool: 0,        // HP left to heal during eat
+    summonId: null,        // id of active companion entity
+    boiledOneActive: false,// whether Boiled One is active
+    boiledOneTimer: 0,     // seconds remaining until first stunned can move
   };
 }
 
@@ -316,9 +326,9 @@ function gameLoop(now) {
 function updateGame(dt) {
   if (!localPlayer) return;
 
-  // Use wall-clock delta for timers so they keep running in background tabs
+  // Use wall-clock delta for timers, capped to prevent huge jumps on tab-switch
   const wallNow = Date.now();
-  const wallDt = Math.min((wallNow - lastWallClock) / 1000, 2); // cap at 2s to avoid huge jumps
+  const wallDt = Math.min((wallNow - lastWallClock) / 1000, 0.1); // cap same as dt to prevent burst damage/cooldowns
   lastWallClock = wallNow;
 
   // Dead: free camera movement
@@ -405,7 +415,62 @@ function updateGame(dt) {
       p.chipChangeTimer = Math.max(0, p.chipChangeTimer - wallDt);
       if (p.chipChangeTimer <= 0) p.chipChangeDmg = -1;
     }
+
+    // Tick Filbus-specific timers
+    if (p.isCraftingChair) {
+      p.craftTimer -= wallDt;
+      if (p.craftTimer <= 0) {
+        p.isCraftingChair = false;
+        p.craftTimer = 0;
+        p.chairCharges++;
+        if (p.id === localPlayerId) {
+          combatLog.push({ text: '🪑 Chair crafted! (' + p.chairCharges + ' chairs)', timer: 3, color: '#2ecc71' });
+          showPopup('🪑 Chair crafted!');
+        }
+      }
+    }
+    if (p.isEatingChair) {
+      p.eatTimer -= wallDt;
+      // Heal gradually over the channel time
+      const channelTime = p.fighter.abilities && p.fighter.abilities[2] ? (p.fighter.abilities[2].channelTime || 3) : 3;
+      const healPerSec = (p.eatHealPool > 0 ? p.eatHealPool : 100) / channelTime;
+      if (p.alive) {
+        p.hp = Math.min(p.maxHp, p.hp + healPerSec * wallDt);
+      }
+      if (p.eatTimer <= 0) {
+        p.isEatingChair = false;
+        p.eatTimer = 0;
+        p.eatHealPool = 0;
+        if (p.id === localPlayerId) {
+          combatLog.push({ text: '🪑 Chair consumed!', timer: 2, color: '#2ecc71' });
+        }
+      }
+    }
+    // Boiled One timer
+    if (p.boiledOneActive) {
+      p.boiledOneTimer -= wallDt;
+      // While active, anyone who can see the dark-red dot gets stunned
+      for (const target of gamePlayers) {
+        if (target.id === p.id || !target.alive || target.isSummon) continue;
+        // Check if target can "see" p (within camera range and not hidden in grass)
+        const dx = target.x - p.x; const dy = target.y - p.y;
+        const viewRange = CAMERA_RANGE * GAME_TILE * 2;
+        if (Math.sqrt(dx * dx + dy * dy) <= viewRange) {
+          if (target.stunned < 1) {
+            target.stunned = 1;
+            target.effects.push({ type: 'stun', timer: 1 });
+          }
+        }
+      }
+      if (p.boiledOneTimer <= 0) {
+        p.boiledOneActive = false;
+        p.boiledOneTimer = 0;
+      }
+    }
   }
+
+  // Update summon AI
+  updateSummons(wallDt);
 
   // Zone shrink timer — use wall-clock so tab-switching doesn't pause it
   const zoneElapsed = (Date.now() - zonePhaseStart) / 1000;
@@ -437,8 +502,9 @@ function updateGame(dt) {
     // Skip normal movement while aiming, but continue world sim below
   }
 
-  // Movement (only if alive and not stunned/aiming)
-  if (localPlayer.alive && !localPlayer.specialAiming && localPlayer.stunned <= 0) {
+  // Movement (only if alive and not stunned/aiming/channeling)
+  if (localPlayer.alive && !localPlayer.specialAiming && localPlayer.stunned <= 0
+      && !localPlayer.isCraftingChair && !localPlayer.isEatingChair) {
     updateMovement(dt);
   }
 
@@ -594,6 +660,93 @@ function updateProjectiles(dt) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// SUMMON AI
+// ═══════════════════════════════════════════════════════════════
+function updateSummons(dt) {
+  for (const s of gamePlayers) {
+    if (!s.isSummon || !s.alive) continue;
+    if (s.stunned > 0) continue;
+
+    const owner = gamePlayers.find(p => p.id === s.summonOwner);
+    const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
+
+    // Find nearest enemy (not owner, not fellow summons of same owner)
+    let bestTarget = null;
+    let bestDist = Infinity;
+    for (const p of gamePlayers) {
+      if (p.id === s.id || p.id === s.summonOwner || !p.alive) continue;
+      if (p.isSummon && p.summonOwner === s.summonOwner) continue;
+      const dx = p.x - s.x; const dy = p.y - s.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < bestDist) { bestDist = dist; bestTarget = p; }
+    }
+
+    s.summonAttackTimer = Math.max(0, s.summonAttackTimer - dt);
+
+    if (s.summonType === 'obelisk') {
+      // Obelisk: stationary, touch = instant kill (except owner)
+      for (const p of gamePlayers) {
+        if (p.id === s.id || p.id === s.summonOwner || !p.alive) continue;
+        if (p.isSummon && p.summonOwner === s.summonOwner) continue;
+        const dx = p.x - s.x; const dy = p.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < radius * 2.5) {
+          dealDamage(owner || s, p, p.hp); // instant kill
+          combatLog.push({ text: '⚱️ ' + p.name + ' touched the Obelisk!', timer: 4, color: '#d4af37' });
+        }
+      }
+    } else if (s.summonType === 'macrocosms') {
+      // Headless Macrocosms: very slow movement, melee attack with cooldown
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const speed = s.summonSpeed;
+        const nx = dx / dist; const ny = dy / dist;
+        const newX = s.x + nx * speed;
+        const newY = s.y + ny * speed;
+        if (canMoveTo(newX, s.y, radius)) s.x = newX;
+        if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        // Attack when in range and off cooldown
+        if (bestDist < radius * 2.5 && s.summonAttackTimer <= 0) {
+          dealDamage(owner || s, bestTarget, s.summonDamage);
+          bestTarget.stunned = s.summonStunDur;
+          bestTarget.effects.push({ type: 'stun', timer: s.summonStunDur });
+          s.summonAttackTimer = s.summonAttackCD;
+          combatLog.push({ text: '👁 Headless Macrocosms struck ' + bestTarget.name + '!', timer: 3, color: '#4a0080' });
+        }
+      }
+    } else if (s.summonType === 'fleshbed') {
+      // Fleshbed: medium speed, attack with stun on cooldown
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const speed = s.summonSpeed;
+        const nx = dx / dist; const ny = dy / dist;
+        const newX = s.x + nx * speed;
+        const newY = s.y + ny * speed;
+        if (canMoveTo(newX, s.y, radius)) s.x = newX;
+        if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        // Attack within melee range
+        if (bestDist < GAME_TILE * 1.5 && s.summonAttackTimer <= 0) {
+          dealDamage(owner || s, bestTarget, s.summonDamage);
+          bestTarget.stunned = s.summonStunDur;
+          bestTarget.effects.push({ type: 'stun', timer: s.summonStunDur });
+          s.summonAttackTimer = s.summonAttackCD;
+          s.effects.push({ type: 'chair-swing', timer: 0.2, aimNx: nx, aimNy: ny });
+        }
+      }
+    }
+
+    // Clean up summon if owner died
+    if (owner && !owner.alive) {
+      s.alive = false;
+      s.hp = 0;
+      s.effects.push({ type: 'death', timer: 2 });
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // CPU AI
 // ═══════════════════════════════════════════════════════════════
 
@@ -636,8 +789,10 @@ function updateCPUs(dt) {
     // Update vision — track "last seen" positions of visible enemies
     cpuUpdateVision(cpu, params);
 
-    // Movement
-    cpuMove(cpu, dt, params);
+    // Movement (skip if channeling)
+    if (!cpu.isCraftingChair && !cpu.isEatingChair) {
+      cpuMove(cpu, dt, params);
+    }
 
     // Combat
     ai.abilityTimer -= dt;
@@ -657,6 +812,7 @@ function cpuChooseTarget(cpu, params) {
   let bestDist = Infinity;
   for (const p of gamePlayers) {
     if (p.id === cpu.id || !p.alive) continue;
+    if (p.isSummon && p.summonOwner === cpu.id) continue; // skip own summons
     // Check if CPU can see the player (not hidden in grass)
     if (cpuIsHidden(p, cpu)) continue;
     const dx = p.x - cpu.x; const dy = p.y - cpu.y;
@@ -749,7 +905,7 @@ function cpuMove(cpu, dt, params) {
       goalY = cpu.y - dy / (dist || 1) * GAME_TILE * 3;
     } else {
       // Approach to ideal range based on fighter type
-      const idealRange = cpu.fighter.id === 'poker' ? 5 * GAME_TILE : 1.2 * GAME_TILE;
+      const idealRange = cpu.fighter.id === 'poker' ? 5 * GAME_TILE : cpu.fighter.id === 'filbus' ? 1.5 * GAME_TILE : 1.2 * GAME_TILE;
       if (dist > idealRange + GAME_TILE) {
         // Move toward target
         goalX = target.x;
@@ -841,6 +997,7 @@ function cpuAttack(cpu, params) {
   const dist = Math.sqrt(dx * dx + dy * dy);
   const fighter = cpu.fighter;
   const isPoker = fighter.id === 'poker';
+  const isFilbus = fighter.id === 'filbus';
 
   // Add aim error based on difficulty
   const errorAngle = (Math.random() - 0.5) * params.aimError * 2;
@@ -855,15 +1012,17 @@ function cpuAttack(cpu, params) {
   // Special
   if (cpu.specialUnlocked && !cpu.specialUsed) {
     if (isPoker) {
-      // Royal Flush: use when enemies nearby
       const closeRange = 3 * GAME_TILE;
       const mediumRange = 10 * GAME_TILE;
       if (dist < mediumRange) {
         cpuUseSpecialPoker(cpu, params);
         return;
       }
+    } else if (isFilbus) {
+      // Boiled One: use when enemies nearby
+      cpuUseSpecialFilbus(cpu);
+      return;
     } else {
-      // Fighter: Special jump — aim at target
       if (dist < 10 * GAME_TILE) {
         cpuUseSpecialFighter(cpu, target);
         return;
@@ -874,13 +1033,18 @@ function cpuAttack(cpu, params) {
   // E ability
   if (cpu.cdE <= 0) {
     if (isPoker) {
-      // Gamble: throw card at target
       if (dist < 12 * GAME_TILE) {
         cpuFireProjectile(cpu, target, 'card', aimAngle);
         return;
       }
+    } else if (isFilbus) {
+      // Filbism (1): craft chair when not in combat range and no chairs
+      if (dist > 4 * GAME_TILE && cpu.chairCharges <= 0 && !cpu.isCraftingChair) {
+        cpu.isCraftingChair = true;
+        cpu.craftTimer = fighter.abilities[1].channelTime || 10;
+        return;
+      }
     } else {
-      // Support: use proactively
       cpu.cdE = fighter.abilities[1].cooldown;
       cpu.supportBuff = fighter.abilities[1].duration;
       cpu.effects.push({ type: 'support', timer: 1.5 });
@@ -891,7 +1055,6 @@ function cpuAttack(cpu, params) {
   // R ability
   if (cpu.cdR <= 0) {
     if (isPoker) {
-      // Blinds
       cpu.cdR = fighter.abilities[2].cooldown;
       const roll = Math.random();
       if (roll < 0.70) { cpu.blindBuff = 'small'; cpu.blindTimer = 0; }
@@ -899,8 +1062,16 @@ function cpuAttack(cpu, params) {
       else { cpu.blindBuff = 'dealer'; cpu.blindTimer = 0; cpu.cdE = 0; }
       cpu.effects.push({ type: 'blind-small', timer: 1.0 });
       return;
+    } else if (isFilbus) {
+      // Filbism (2): eat chair to heal when hurt
+      if (cpu.chairCharges > 0 && cpu.hp < cpu.maxHp * 0.6 && !cpu.isEatingChair) {
+        cpu.isEatingChair = true;
+        cpu.eatTimer = fighter.abilities[2].channelTime || 3;
+        cpu.eatHealPool = fighter.abilities[2].healAmount || 100;
+        cpu.chairCharges--;
+        return;
+      }
     } else {
-      // Power Swing: use when very close
       if (dist < fighter.abilities[2].range * GAME_TILE) {
         cpuPowerSwing(cpu, target, aimNx, aimNy);
         return;
@@ -911,14 +1082,54 @@ function cpuAttack(cpu, params) {
   // T ability
   if (cpu.cdT <= 0 && Math.random() < 0.3) {
     if (isPoker) {
-      // Chip Change
       cpu.cdT = fighter.abilities[3].cooldown;
       const options = [50, 100, 200, 300, 400];
       cpu.chipChangeDmg = options[Math.floor(Math.random() * options.length)];
       cpu.chipChangeTimer = fighter.abilities[3].duration || 30;
       return;
+    } else if (isFilbus) {
+      // Oddity Overthrow: summon a companion
+      if (!cpu.summonId) {
+        cpu.cdT = fighter.abilities[3].cooldown;
+        const abil = fighter.abilities[3];
+        const companionKeys = Object.keys(abil.companions);
+        const pick = companionKeys[Math.floor(Math.random() * companionKeys.length)];
+        const compDef = abil.companions[pick];
+        const summonId = 'summon-' + cpu.id + '-' + Date.now();
+        const summon = {
+          id: summonId,
+          name: compDef.name,
+          color: pick === 'fleshbed' ? '#8b4513' : pick === 'macrocosms' ? '#4a0080' : '#d4af37',
+          x: cpu.x + (Math.random() - 0.5) * GAME_TILE * 2,
+          y: cpu.y + (Math.random() - 0.5) * GAME_TILE * 2,
+          hp: compDef.hp, maxHp: compDef.hp,
+          fighter: fighter, alive: true,
+          cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
+          totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+          supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+          noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+          specialJumping: false, specialAiming: false,
+          specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+          effects: [],
+          blindBuff: null, blindTimer: 0, chipChangeDmg: -1, chipChangeTimer: 0,
+          chairCharges: 0, isCraftingChair: false, craftTimer: 0,
+          isEatingChair: false, eatTimer: 0, eatHealPool: 0,
+          summonId: null, boiledOneActive: false, boiledOneTimer: 0,
+          isSummon: true, summonOwner: cpu.id, summonType: pick,
+          summonSpeed: compDef.speed, summonDamage: compDef.damage,
+          summonStunDur: compDef.stunDuration, summonAttackCD: compDef.attackCooldown,
+          summonAttackTimer: 0,
+        };
+        if (pick === 'obelisk') {
+          summon.x = cpu.x;
+          summon.y = cpu.y;
+        }
+        gamePlayers.push(summon);
+        cpu.summonId = summonId;
+        cpu.effects.push({ type: 'summon', timer: 1.5 });
+        return;
+      }
     } else {
-      // Intimidation
       const sightRange = CAMERA_RANGE * GAME_TILE * 2;
       if (dist <= sightRange) {
         cpu.cdT = fighter.abilities[3].cooldown;
@@ -939,12 +1150,15 @@ function cpuAttack(cpu, params) {
   // M1 — primary attack
   if (cpu.cdM1 <= 0) {
     if (isPoker) {
-      // Chip throw
       if (dist < 8 * GAME_TILE) {
         cpuFireChips(cpu, target, aimAngle);
       }
+    } else if (isFilbus) {
+      // Chair swing
+      if (dist < (fighter.abilities[0].range || 1.8) * GAME_TILE) {
+        cpuChairSwing(cpu, target, aimNx, aimNy);
+      }
     } else {
-      // Sword swing
       if (dist < fighter.abilities[0].range * GAME_TILE) {
         cpuSwordSwing(cpu, target, aimNx, aimNy);
       }
@@ -1103,6 +1317,49 @@ function cpuUseSpecialFighter(cpu, target) {
   cpu.effects.push({ type: 'land', timer: 0.5 });
 }
 
+function cpuChairSwing(cpu, target, aimNx, aimNy) {
+  const fighter = cpu.fighter;
+  const abil = fighter.abilities[0];
+  cpu.cdM1 = abil.cooldown;
+  // Cancel channels
+  cpu.isCraftingChair = false;
+  cpu.craftTimer = 0;
+  cpu.isEatingChair = false;
+  cpu.eatTimer = 0;
+
+  const isTable = Math.random() < (abil.tableChance || 0.05);
+  const range = (isTable ? (abil.tableRange || 2.5) : (abil.range || 1.8)) * GAME_TILE;
+  let baseDmg = isTable ? (abil.tableDamage || 400) : (abil.damage || 250);
+  if (cpu.supportBuff > 0) baseDmg *= 1.5;
+  if (cpu.intimidated > 0) baseDmg *= 0.5;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    if (t.isSummon && t.summonOwner === cpu.id) continue;
+    const dx = t.x - cpu.x; const dy = t.y - cpu.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > range) continue;
+    const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+    if (dot < 0) continue;
+    dealDamage(cpu, t, baseDmg);
+  }
+  cpu.effects.push({ type: isTable ? 'table-swing' : 'chair-swing', timer: 0.2, aimNx, aimNy });
+}
+
+function cpuUseSpecialFilbus(cpu) {
+  const fighter = cpu.fighter;
+  cpu.specialUsed = true;
+  cpu.boiledOneActive = true;
+  const stunDur = fighter.abilities[4].stunDuration || 10;
+  cpu.boiledOneTimer = stunDur;
+  for (const t of gamePlayers) {
+    if (!t.alive || t.isSummon) continue;
+    if (t.id === cpu.id) continue; // Filbus is immune
+    t.stunned = stunDur;
+    t.effects.push({ type: 'stun', timer: stunDur });
+  }
+  cpu.effects.push({ type: 'boiled-one', timer: stunDur + 1 });
+}
+
 // ═══════════════════════════════════════════════════════════════
 // ABILITIES
 // ═══════════════════════════════════════════════════════════════
@@ -1113,6 +1370,16 @@ function useAbility(key) {
   const fighter = lp.fighter;
   const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
   const isPoker = fighter.id === 'poker';
+  const isFilbus = fighter.id === 'filbus';
+
+  // Filbus: channeling interrupts
+  if (isFilbus && (key !== 'E' && key !== 'R')) {
+    lp.isCraftingChair = false;
+    lp.craftTimer = 0;
+    lp.isEatingChair = false;
+    lp.eatTimer = 0;
+    lp.eatHealPool = 0;
+  }
 
   if (key === 'M1') {
     if (lp.cdM1 > 0) return;
@@ -1149,6 +1416,35 @@ function useAbility(key) {
       // Clear small blind when using another move
       if (lp.blindBuff === 'small') lp.blindBuff = null;
       lp.effects.push({ type: 'chip-throw', timer: 0.2 });
+    } else if (isFilbus) {
+      // Filbus: Swing Chair (rare table chance)
+      const isTable = Math.random() < (abil.tableChance || 0.05);
+      const range = (isTable ? (abil.tableRange || 2.5) : (abil.range || 1.8)) * GAME_TILE;
+      let baseDmg = isTable ? (abil.tableDamage || 400) : (abil.damage || 250);
+      if (lp.supportBuff > 0) baseDmg *= 1.5;
+      if (lp.intimidated > 0) baseDmg *= 0.5;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > range) continue;
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < 0) continue;
+        dealDamage(lp, target, baseDmg);
+      }
+      if (isTable) {
+        combatLog.push({ text: '🪑 TABLE SWING! 400 dmg!', timer: 3, color: '#ff6600' });
+        lp.effects.push({ type: 'table-swing', timer: 0.3, aimNx, aimNy });
+      } else {
+        lp.effects.push({ type: 'chair-swing', timer: 0.2, aimNx, aimNy });
+      }
     } else {
       // Fighter: Sword (original M1)
       const range = abil.range * GAME_TILE;
@@ -1209,6 +1505,23 @@ function useAbility(key) {
       // Clear small blind when using another move
       if (lp.blindBuff === 'small') lp.blindBuff = null;
       lp.effects.push({ type: 'gamble', timer: 0.5 });
+    } else if (isFilbus) {
+      // Filbus E: Filbism (1) — start crafting a chair (10s channel)
+      // No cooldown needed; channeling is the gate
+      lp.cdE = 0; // refund the cooldown we set above
+      if (lp.isCraftingChair) {
+        // Cancel crafting
+        lp.isCraftingChair = false;
+        lp.craftTimer = 0;
+        combatLog.push({ text: '🪑 Chair crafting cancelled', timer: 2, color: '#999' });
+      } else {
+        lp.isCraftingChair = true;
+        lp.craftTimer = abil.channelTime || 10;
+        lp.isEatingChair = false;
+        lp.eatTimer = 0;
+        combatLog.push({ text: '🪑 Crafting a chair...', timer: 2, color: '#c8a96e' });
+        lp.effects.push({ type: 'crafting', timer: (abil.channelTime || 10) + 0.5 });
+      }
     } else {
       // Fighter: Support buff
       lp.supportBuff = abil.duration;
@@ -1250,6 +1563,27 @@ function useAbility(key) {
       // Broadcast blind to other clients
       if (typeof socket !== 'undefined' && socket.emit) {
         socket.emit('player-buff', { type: 'blind', duration: lp.blindBuff === 'big' ? 60 : 0 });
+      }
+    } else if (isFilbus) {
+      // Filbus R: Filbism (2) — eat a chair to heal 100 HP over 3s
+      lp.cdR = 0; // refund cooldown
+      if (lp.isEatingChair) {
+        // Cancel eating
+        lp.isEatingChair = false;
+        lp.eatTimer = 0;
+        lp.eatHealPool = 0;
+        combatLog.push({ text: '🪑 Stopped eating chair', timer: 2, color: '#999' });
+      } else if (lp.chairCharges <= 0) {
+        combatLog.push({ text: '🪑 No chairs to eat!', timer: 2, color: '#e94560' });
+      } else {
+        lp.isEatingChair = true;
+        lp.eatTimer = abil.channelTime || 3;
+        lp.eatHealPool = abil.healAmount || 100;
+        lp.isCraftingChair = false;
+        lp.craftTimer = 0;
+        lp.chairCharges--;
+        combatLog.push({ text: '🪑 Eating a chair... (' + lp.chairCharges + ' left)', timer: 2, color: '#2ecc71' });
+        lp.effects.push({ type: 'eating', timer: (abil.channelTime || 3) + 0.5 });
       }
     } else {
       // Fighter: Power Swing
@@ -1299,6 +1633,68 @@ function useAbility(key) {
       // Clear small blind when using another move
       if (lp.blindBuff === 'small') lp.blindBuff = null;
       lp.effects.push({ type: 'chip-change', timer: 1.5 });
+    } else if (isFilbus) {
+      // Filbus T: Oddity Overthrow — summon or dismiss companion
+      if (lp.summonId) {
+        // Dismiss existing summon
+        const sIdx = gamePlayers.findIndex(p => p.id === lp.summonId);
+        if (sIdx >= 0) {
+          gamePlayers[sIdx].alive = false;
+          gamePlayers[sIdx].hp = 0;
+          gamePlayers[sIdx].effects.push({ type: 'death', timer: 2 });
+          gamePlayers.splice(sIdx, 1);
+        }
+        lp.summonId = null;
+        lp.cdT = 5; // short cooldown on dismiss
+        combatLog.push({ text: '👋 Companion dismissed', timer: 2, color: '#999' });
+      } else {
+        // Summon a random companion
+        const companionKeys = Object.keys(abil.companions);
+        const pick = companionKeys[Math.floor(Math.random() * companionKeys.length)];
+        const compDef = abil.companions[pick];
+        const summonId = 'summon-' + lp.id + '-' + Date.now();
+        const summon = {
+          id: summonId,
+          name: compDef.name,
+          color: pick === 'fleshbed' ? '#8b4513' : pick === 'macrocosms' ? '#4a0080' : '#d4af37',
+          x: lp.x + (Math.random() - 0.5) * GAME_TILE * 2,
+          y: lp.y + (Math.random() - 0.5) * GAME_TILE * 2,
+          hp: compDef.hp,
+          maxHp: compDef.hp,
+          fighter: fighter,
+          alive: true,
+          cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
+          totalDamageTaken: 0,
+          specialUnlocked: false, specialUsed: false,
+          supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+          noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+          specialJumping: false, specialAiming: false,
+          specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+          effects: [],
+          blindBuff: null, blindTimer: 0, chipChangeDmg: -1, chipChangeTimer: 0,
+          chairCharges: 0, isCraftingChair: false, craftTimer: 0,
+          isEatingChair: false, eatTimer: 0, eatHealPool: 0,
+          summonId: null, boiledOneActive: false, boiledOneTimer: 0,
+          // Summon-specific
+          isSummon: true,
+          summonOwner: lp.id,
+          summonType: pick,
+          summonSpeed: compDef.speed,
+          summonDamage: compDef.damage,
+          summonStunDur: compDef.stunDuration,
+          summonAttackCD: compDef.attackCooldown,
+          summonAttackTimer: 0,
+        };
+        // Obelisk spawns at Filbus's position
+        if (pick === 'obelisk') {
+          summon.x = lp.x;
+          summon.y = lp.y;
+        }
+        gamePlayers.push(summon);
+        lp.summonId = summonId;
+        combatLog.push({ text: '🔮 Summoned ' + compDef.name + '!', timer: 3, color: '#d4af37' });
+        lp.effects.push({ type: 'summon', timer: 1.5 });
+      }
     } else {
       // Fighter: Intimidation
       const sightRange = CAMERA_RANGE * GAME_TILE * 2;
@@ -1365,6 +1761,26 @@ function useAbility(key) {
       if (typeof socket !== 'undefined' && socket.emit) {
         socket.emit('player-buff', { type: 'royal-flush', duration: stunDur, cx: lp.x, cy: lp.y });
       }
+    } else if (isFilbus) {
+      // Filbus SPACE: The Boiled One Phenomenon
+      // Phen 228 enters — stun ALL fighters for 10s, dot turns dark red
+      // Anyone who sees the dark red dot gets stunned
+      // Lasts until first stunned player can move
+      lp.specialUsed = true;
+      lp.boiledOneActive = true;
+      const stunDur = fighter.abilities[4].stunDuration || 10;
+      lp.boiledOneTimer = stunDur;
+      // Stun everyone except Filbus
+      for (const target of gamePlayers) {
+        if (!target.alive) continue;
+        if (target.isSummon) continue;
+        if (target.id === lp.id) continue; // Filbus is immune
+        target.stunned = stunDur;
+        target.effects.push({ type: 'stun', timer: stunDur });
+      }
+      showPopup('🩸 THE BOILED ONE PHENOMENON');
+      lp.effects.push({ type: 'boiled-one', timer: stunDur + 1 });
+      combatLog.push({ text: '🩸 Phen 228 has entered...', timer: 5, color: '#8b0000' });
     } else {
       // Fighter: Special jump
       lp.specialJumping = true;
@@ -1422,6 +1838,8 @@ function executeSpecialLanding() {
 
 function dealDamage(attacker, target, amount) {
   if (!target.alive) return;
+  // Obelisk is invincible
+  if (target.isSummon && target.summonType === 'obelisk') return;
   // Blinds modifier (Poker)
   if (target.blindBuff === 'small') amount = Math.round(amount * 0.5);
   else if (target.blindBuff === 'big') amount = Math.round(amount * 1.5);
@@ -1431,6 +1849,23 @@ function dealDamage(attacker, target, amount) {
   target.isHealing = false;
   target.healTickTimer = 0;
   target.effects.push({ type: 'hit', timer: 0.3 });
+
+  // Filbus: interrupt channeling on damage
+  if (target.isCraftingChair) {
+    target.isCraftingChair = false;
+    target.craftTimer = 0;
+    if (target.id === localPlayerId) {
+      combatLog.push({ text: '🪑 Chair crafting interrupted!', timer: 2, color: '#e94560' });
+    }
+  }
+  if (target.isEatingChair) {
+    target.isEatingChair = false;
+    target.eatTimer = 0;
+    target.eatHealPool = 0;
+    if (target.id === localPlayerId) {
+      combatLog.push({ text: '🪑 Chair eating interrupted!', timer: 2, color: '#e94560' });
+    }
+  }
 
   // Track damage taken for special unlock (target's counter)
   target.totalDamageTaken += amount;
@@ -1470,6 +1905,23 @@ function dealDamage(attacker, target, amount) {
     // Training dummy respawn after 3 seconds
     if (target.id === 'dummy' && gameMode === 'training') {
       dummyRespawnTimer = 3;
+    }
+    // Summon death: clear owner's summonId
+    if (target.isSummon) {
+      const owner = gamePlayers.find(p => p.id === target.summonOwner);
+      if (owner && owner.summonId === target.id) {
+        owner.summonId = null;
+      }
+    }
+    // Owner death: clear summon reference (summon cleanup in updateSummons)
+    if (target.summonId) {
+      const summon = gamePlayers.find(p => p.id === target.summonId);
+      if (summon && summon.alive) {
+        summon.alive = false;
+        summon.hp = 0;
+        summon.effects.push({ type: 'death', timer: 2 });
+      }
+      target.summonId = null;
     }
     // Tell server this player died
     if (typeof socket !== 'undefined' && socket.emit) {
@@ -1670,11 +2122,84 @@ function renderGame() {
       gameCtx.fill();
     }
 
-    // Dot — dark red if dying
-    gameCtx.fillStyle = isDying ? '#8b0000' : p.color;
-    gameCtx.beginPath();
-    gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
-    gameCtx.fill();
+    // Dot — dark red if dying or Boiled One active
+    if (p.isSummon) {
+      // ── Custom summon shapes ──
+      if (p.summonType === 'fleshbed') {
+        // Grey square
+        const sz = radius * 1.6;
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#888';
+        gameCtx.fillRect(sx - sz / 2, sy - sz / 2, sz, sz);
+        gameCtx.strokeStyle = '#555';
+        gameCtx.lineWidth = 2;
+        gameCtx.strokeRect(sx - sz / 2, sy - sz / 2, sz, sz);
+        // Dark inner lines for texture
+        gameCtx.strokeStyle = '#666';
+        gameCtx.lineWidth = 1;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - sz / 4, sy - sz / 2);
+        gameCtx.lineTo(sx - sz / 4, sy + sz / 2);
+        gameCtx.moveTo(sx + sz / 4, sy - sz / 2);
+        gameCtx.lineTo(sx + sz / 4, sy + sz / 2);
+        gameCtx.stroke();
+      } else if (p.summonType === 'macrocosms') {
+        // Grey circle
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#999';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.1, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#555';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius * 1.1, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // No head — just a dark void at top
+        gameCtx.fillStyle = '#333';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius * 0.4, radius * 0.35, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'obelisk') {
+        // Black triangle with red streaks
+        const h = radius * 2.2;
+        const base = radius * 1.6;
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy - h / 2);           // top
+        gameCtx.lineTo(sx - base / 2, sy + h / 2); // bottom-left
+        gameCtx.lineTo(sx + base / 2, sy + h / 2); // bottom-right
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Outline
+        gameCtx.strokeStyle = '#333';
+        gameCtx.lineWidth = 2;
+        gameCtx.stroke();
+        // Red streaks
+        gameCtx.strokeStyle = '#8b0000';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - 2, sy - h * 0.3);
+        gameCtx.lineTo(sx - 4, sy + h * 0.2);
+        gameCtx.moveTo(sx + 3, sy - h * 0.25);
+        gameCtx.lineTo(sx + 1, sy + h * 0.3);
+        gameCtx.moveTo(sx, sy - h * 0.1);
+        gameCtx.lineTo(sx - 2, sy + h * 0.35);
+        gameCtx.stroke();
+        // Glowing red eye near top
+        gameCtx.fillStyle = '#ff2200';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - h * 0.15, 2.5, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.fillStyle = 'rgba(255, 34, 0, 0.3)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - h * 0.15, 5, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    } else {
+      // Normal player dot
+      gameCtx.fillStyle = isDying ? '#8b0000' : (p.boiledOneActive ? '#8b0000' : p.color);
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
 
     // Outline
     gameCtx.strokeStyle = 'rgba(0,0,0,0.4)';
@@ -1719,6 +2244,36 @@ function renderGame() {
         gameCtx.lineTo(nx2, ny2);
         gameCtx.stroke();
       }
+    } else if (p.fighter && p.fighter.id === 'filbus') {
+      // Filbus: chair icon on the dot
+      const chairAngle = -Math.PI / 4;
+      const chairX = sx + Math.cos(chairAngle) * (radius + 2);
+      const chairY = sy + Math.sin(chairAngle) * (radius + 2);
+      const chairW = radius * 0.7;
+      const chairH = radius * 0.5;
+      // Seat
+      gameCtx.fillStyle = '#a0522d';
+      gameCtx.fillRect(chairX - chairW / 2, chairY - chairH / 2, chairW, chairH);
+      // Back
+      gameCtx.fillStyle = '#8b4513';
+      gameCtx.fillRect(chairX - chairW / 2, chairY - chairH, chairW * 0.25, chairH);
+      gameCtx.fillRect(chairX + chairW / 4, chairY - chairH, chairW * 0.25, chairH);
+      // Legs
+      gameCtx.strokeStyle = '#654321';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.beginPath();
+      gameCtx.moveTo(chairX - chairW / 2 + 1, chairY + chairH / 2);
+      gameCtx.lineTo(chairX - chairW / 2 + 1, chairY + chairH);
+      gameCtx.moveTo(chairX + chairW / 2 - 1, chairY + chairH / 2);
+      gameCtx.lineTo(chairX + chairW / 2 - 1, chairY + chairH);
+      gameCtx.stroke();
+      // Summon indicator dot if summon active
+      if (p.summonId) {
+        gameCtx.fillStyle = '#d4af37';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
     } else {
       // Fighter: Sword indicator on the dot
       const swordLen = radius * 1.3;
@@ -1743,6 +2298,7 @@ function renderGame() {
       gameCtx.lineTo(hiltX - Math.cos(perpAngle) * 4, hiltY - Math.sin(perpAngle) * 4);
       gameCtx.stroke();
     }
+    } // end normal player dot
 
     // Support buff ring (visible to all players)
     if (p.supportBuff > 0) {
@@ -1874,6 +2430,103 @@ function renderGame() {
       gameCtx.fill();
     }
 
+    // Filbus: Chair swing arc effect
+    const chairFx = p.effects.find((fx) => fx.type === 'chair-swing');
+    if (chairFx) {
+      const swLen = GAME_TILE * 1.5;
+      gameCtx.strokeStyle = '#a0522d';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(chairFx.aimNy, chairFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.6, aRad + 0.6);
+      gameCtx.stroke();
+    }
+
+    // Filbus: Table swing effect (bigger, orange)
+    const tableFx = p.effects.find((fx) => fx.type === 'table-swing');
+    if (tableFx) {
+      const swLen = GAME_TILE * 2.2;
+      gameCtx.strokeStyle = '#ff6600';
+      gameCtx.lineWidth = 5;
+      gameCtx.beginPath();
+      const aRad = Math.atan2(tableFx.aimNy, tableFx.aimNx);
+      gameCtx.arc(sx, sy, swLen, aRad - 0.7, aRad + 0.7);
+      gameCtx.stroke();
+      gameCtx.fillStyle = 'rgba(255, 102, 0, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, swLen, aRad - 0.7, aRad + 0.7);
+      gameCtx.fill();
+    }
+
+    // Filbus: Crafting channel indicator
+    if (p.isCraftingChair) {
+      const pct = 1 - (p.craftTimer / ((p.fighter.abilities && p.fighter.abilities[1] ? p.fighter.abilities[1].channelTime : 10) || 10));
+      gameCtx.strokeStyle = '#c8a96e';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, -Math.PI / 2, -Math.PI / 2 + pct * Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#c8a96e';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🪑 ' + Math.ceil(p.craftTimer) + 's', sx, sy + radius + 20);
+    }
+
+    // Filbus: Eating channel indicator
+    if (p.isEatingChair) {
+      const pct = 1 - (p.eatTimer / ((p.fighter.abilities && p.fighter.abilities[2] ? p.fighter.abilities[2].channelTime : 3) || 3));
+      gameCtx.strokeStyle = '#2ecc71';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, -Math.PI / 2, -Math.PI / 2 + pct * Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = '#2ecc71';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🍽 ' + Math.ceil(p.eatTimer) + 's', sx, sy + radius + 20);
+    }
+
+    // Filbus: Chair charges display
+    if (p.fighter && p.fighter.id === 'filbus' && p.chairCharges > 0 && p.alive) {
+      gameCtx.fillStyle = '#c8a96e';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🪑×' + p.chairCharges, sx, sy + radius + (p.isCraftingChair || p.isEatingChair ? 32 : 18));
+    }
+
+    // Filbus: Boiled One dark aura
+    if (p.boiledOneActive) {
+      gameCtx.strokeStyle = '#8b0000';
+      gameCtx.lineWidth = 4;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 16, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.fillStyle = 'rgba(139, 0, 0, 0.2)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 16, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#8b0000';
+      gameCtx.font = 'bold 10px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('🩸BOILED ' + Math.ceil(p.boiledOneTimer) + 's', sx, sy - radius - 26);
+    }
+
+    // Summon-specific rendering
+    if (p.isSummon) {
+      // Tether line to owner
+      const owner2 = gamePlayers.find(pl => pl.id === p.summonOwner);
+      if (owner2 && owner2.alive) {
+        const ownSx = owner2.x - camX;
+        const ownSy = owner2.y - camY;
+        gameCtx.strokeStyle = 'rgba(212, 175, 55, 0.3)';
+        gameCtx.lineWidth = 1;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy);
+        gameCtx.lineTo(ownSx, ownSy);
+        gameCtx.stroke();
+      }
+    }
+
     gameCtx.restore();
   }
 
@@ -1907,6 +2560,26 @@ function renderGame() {
       gameCtx.textBaseline = 'middle';
       gameCtx.fillText('♠', 0, 0);
       gameCtx.restore();
+    }
+  }
+
+  // Boiled One horror overlay — dark reddish tint + random dark patches
+  const anyBoiledOne = gamePlayers.some(p => p.boiledOneActive);
+  if (anyBoiledOne) {
+    gameCtx.fillStyle = 'rgba(60, 0, 0, 0.5)';
+    gameCtx.fillRect(0, 0, cw, ch);
+    // Random dark splotches scattered across the screen (seeded by frame-stable positions)
+    const t = Math.floor(Date.now() / 200); // shift slowly
+    for (let i = 0; i < 18; i++) {
+      const seed = i * 7919 + 1301;
+      const px = ((seed * 31 + t * 3) % cw + cw) % cw;
+      const py = ((seed * 47 + t * 5) % ch + ch) % ch;
+      const r = 30 + (seed % 60);
+      const alpha = 0.08 + (seed % 12) * 0.015;
+      gameCtx.fillStyle = 'rgba(0, 0, 0, ' + alpha + ')';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, r, 0, Math.PI * 2);
+      gameCtx.fill();
     }
   }
 
@@ -2048,6 +2721,35 @@ function drawEffectLog() {
     gameCtx.fillText('😨 Intimidated ' + Math.ceil(lp.intimidated) + 's', cw / 2, logY);
     logY += 20;
   }
+  // Filbus status
+  if (lp.isCraftingChair) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🪑 Crafting... ' + Math.ceil(lp.craftTimer) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#c8a96e';
+    gameCtx.fillText('🪑 Crafting... ' + Math.ceil(lp.craftTimer) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.isEatingChair) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🍽 Eating chair... ' + Math.ceil(lp.eatTimer) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#2ecc71';
+    gameCtx.fillText('🍽 Eating chair... ' + Math.ceil(lp.eatTimer) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.chairCharges > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🪑 Chairs: ' + lp.chairCharges, cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#c8a96e';
+    gameCtx.fillText('🪑 Chairs: ' + lp.chairCharges, cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.boiledOneActive) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🩸 BOILED ONE ' + Math.ceil(lp.boiledOneTimer) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#8b0000';
+    gameCtx.fillText('🩸 BOILED ONE ' + Math.ceil(lp.boiledOneTimer) + 's', cw / 2, logY);
+    logY += 20;
+  }
   for (let i = 0; i < combatLog.length; i++) {
     const entry = combatLog[i];
     gameCtx.fillStyle = '#000';
@@ -2143,7 +2845,7 @@ function showPopup(text) {
 
 function checkWinCondition() {
   if (gameMode === 'fight') {
-    const alive = gamePlayers.filter(p => p.alive);
+    const alive = gamePlayers.filter(p => p.alive && !p.isSummon);
     // When local player dies, show placement immediately
     if (!localPlayer.alive && gameRunning) {
       const place = alive.length + 1; // they were eliminated, so their place = alive count + 1
