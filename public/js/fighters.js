@@ -62,8 +62,8 @@ const FIGHTERS = {
       {
         key: 'SPACE',
         name: 'Super-Special-High-Jump-Move',
-        description: 'Jumps out of the stage, then aims a landing (5s to aim). Hit = 2000 damage. Miss = 3 second stun + 200 self-damage.',
-        damage: 2000,
+        description: 'Jumps out of the stage, then aims a landing (5s to aim). Hit = 1000 damage. Miss = 3 second stun + 200 self-damage.',
+        damage: 1000,
         missDamage: 200,
         missStun: 3,
         aimTime: 5,          // seconds to aim before landing
@@ -95,7 +95,7 @@ const FIGHTERS = {
         bind: 'click',
         projectileCount: 3,
         projectileSpread: 0.15,
-        projectileSpeed: 8,
+        projectileSpeed: 28,
       },
       {
         key: 'E',
@@ -106,7 +106,7 @@ const FIGHTERS = {
         range: 7,
         type: 'ranged',
         bind: 'e',
-        projectileSpeed: 10,
+        projectileSpeed: 18,
       },
       {
         key: 'R',
@@ -130,11 +130,12 @@ const FIGHTERS = {
       {
         key: 'SPACE',
         name: 'Royal Flush',
-        description: 'Heals to full HP, resets all enemy cooldowns + charges, stuns enemies for 3s. Auto-kills enemies below 500 HP.',
+        description: 'Heals to full HP, resets all enemy cooldowns + charges, stuns enemies for 3s. Auto-kills enemies below 500 HP. Range: 10 tiles.',
         damage: 0,
         cooldown: 0,
         stunDuration: 3,
         executeThreshold: 500,
+        range: 10,
         type: 'special',
         bind: ' ',
       },

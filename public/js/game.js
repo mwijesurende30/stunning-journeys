@@ -296,7 +296,10 @@ function updateGame(dt) {
     });
 
     // Tick Poker-specific timers
-    if (p.blindTimer > 0) {
+    if (p.blindBuff === 'dealer') {
+      p.blindTimer += wallDt;
+      if (p.blindTimer >= 3) { p.blindBuff = null; p.blindTimer = 0; }
+    } else if (p.blindTimer > 0) {
       p.blindTimer = Math.max(0, p.blindTimer - wallDt);
       if (p.blindTimer <= 0 && p.blindBuff === 'big') p.blindBuff = null;
     }
@@ -486,9 +489,9 @@ function useAbility(key) {
         const angle = baseAngle + (i - (count - 1) / 2) * spread;
         const vx = Math.cos(angle) * (abil.projectileSpeed || 8) * GAME_TILE / 10;
         const vy = Math.sin(angle) * (abil.projectileSpeed || 8) * GAME_TILE / 10;
-        const proj = { x: lp.x, y: lp.y, vx, vy, ownerId: lp.id, damage: dmg, timer: 1.5, type: 'chip' };
+        const proj = { x: lp.x, y: lp.y, vx, vy, ownerId: lp.id, damage: dmg, timer: 0.8, type: 'chip' };
         projectiles.push(proj);
-        spawnedChips.push({ x: proj.x, y: proj.y, vx, vy, timer: 1.5, type: 'chip' });
+        spawnedChips.push({ x: proj.x, y: proj.y, vx, vy, timer: 0.8, type: 'chip' });
       }
       // Visual sync to other clients
       if (typeof socket !== 'undefined' && socket.emit) {
@@ -543,16 +546,16 @@ function useAbility(key) {
       else dmg = 1000; // 5% chance
       if (lp.supportBuff > 0) dmg *= 1.5;
       if (lp.intimidated > 0) dmg *= 0.5;
-      const cvx = Math.cos(angle) * (abil.projectileSpeed || 10) * GAME_TILE / 10;
-      const cvy = Math.sin(angle) * (abil.projectileSpeed || 10) * GAME_TILE / 10;
+      const cvx = Math.cos(angle) * (abil.projectileSpeed || 18) * GAME_TILE / 10;
+      const cvy = Math.sin(angle) * (abil.projectileSpeed || 18) * GAME_TILE / 10;
       projectiles.push({
         x: lp.x, y: lp.y, vx: cvx, vy: cvy,
         ownerId: lp.id, damage: Math.round(dmg),
-        timer: 2.0, type: 'card',
+        timer: 999, type: 'card',
       });
       // Visual sync
       if (typeof socket !== 'undefined' && socket.emit) {
-        socket.emit('projectile-spawn', { projectiles: [{ x: lp.x, y: lp.y, vx: cvx, vy: cvy, timer: 2.0, type: 'card' }] });
+        socket.emit('projectile-spawn', { projectiles: [{ x: lp.x, y: lp.y, vx: cvx, vy: cvy, timer: 999, type: 'card' }] });
       }
       showPopup('🎲 Gamble: ' + Math.round(dmg) + ' DMG!');
       // Clear small blind when using another move
@@ -671,13 +674,17 @@ function useAbility(key) {
     if (!lp.specialUnlocked || lp.specialUsed) return;
 
     if (isPoker) {
-      // Royal Flush: heal to full, stun enemies, reset their CDs, execute <500hp
+      // Royal Flush: heal to full, stun enemies in range, reset CDs, execute <500hp
       lp.specialUsed = true;
       lp.hp = lp.maxHp;
       const stunDur = fighter.abilities[4].stunDuration || 3;
       const execThresh = fighter.abilities[4].executeThreshold || 500;
+      const rfRange = (fighter.abilities[4].range || 10) * GAME_TILE;
       for (const target of gamePlayers) {
         if (target.id === lp.id || !target.alive) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > rfRange) continue; // out of range
         // Auto-kill if below threshold
         if (target.hp <= execThresh) {
           dealDamage(lp, target, target.hp);
@@ -1192,13 +1199,14 @@ function renderGame() {
       const angle = Math.atan2(proj.vy, proj.vx);
       gameCtx.translate(px, py);
       gameCtx.rotate(angle);
+      // Large card shape
       gameCtx.fillStyle = '#fff';
-      gameCtx.fillRect(-8, -5, 16, 10);
+      gameCtx.fillRect(-14, -9, 28, 18);
       gameCtx.strokeStyle = '#e94560';
-      gameCtx.lineWidth = 1;
-      gameCtx.strokeRect(-8, -5, 16, 10);
+      gameCtx.lineWidth = 2;
+      gameCtx.strokeRect(-14, -9, 28, 18);
       gameCtx.fillStyle = '#e94560';
-      gameCtx.font = 'bold 8px sans-serif';
+      gameCtx.font = 'bold 12px sans-serif';
       gameCtx.textAlign = 'center';
       gameCtx.textBaseline = 'middle';
       gameCtx.fillText('♠', 0, 0);
@@ -1265,6 +1273,50 @@ function drawTopRightHP() {
   gameCtx.fillText(text, 22, 38);
   gameCtx.fillStyle = hpColor;
   gameCtx.fillText(text, 20, 36);
+
+  // Active effects log (Poker blind/chip change, Fighter support/intimidation)
+  let logY = 60;
+  gameCtx.font = 'bold 12px "Press Start 2P", monospace';
+  if (lp.blindBuff === 'small') {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🛡 Small Blind (½ dmg taken)', 22, logY + 1);
+    gameCtx.fillStyle = '#64c8ff';
+    gameCtx.fillText('🛡 Small Blind (½ dmg taken)', 20, logY);
+    logY += 18;
+  } else if (lp.blindBuff === 'big' && lp.blindTimer > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('⚠ Big Blind 1.5× ' + Math.ceil(lp.blindTimer) + 's', 22, logY + 1);
+    gameCtx.fillStyle = '#ff5050';
+    gameCtx.fillText('⚠ Big Blind 1.5× ' + Math.ceil(lp.blindTimer) + 's', 20, logY);
+    logY += 18;
+  } else if (lp.blindBuff === 'dealer') {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🎰 Dealer — Gamble reset!', 22, logY + 1);
+    gameCtx.fillStyle = '#f5a623';
+    gameCtx.fillText('🎰 Dealer — Gamble reset!', 20, logY);
+    logY += 18;
+  }
+  if (lp.chipChangeDmg >= 0 && lp.chipChangeTimer > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('♠ Chips→' + lp.chipChangeDmg + ' ' + Math.ceil(lp.chipChangeTimer) + 's', 22, logY + 1);
+    gameCtx.fillStyle = '#f5a623';
+    gameCtx.fillText('♠ Chips→' + lp.chipChangeDmg + ' ' + Math.ceil(lp.chipChangeTimer) + 's', 20, logY);
+    logY += 18;
+  }
+  if (lp.supportBuff > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('💪 Support ' + Math.ceil(lp.supportBuff) + 's', 22, logY + 1);
+    gameCtx.fillStyle = '#2ecc71';
+    gameCtx.fillText('💪 Support ' + Math.ceil(lp.supportBuff) + 's', 20, logY);
+    logY += 18;
+  }
+  if (lp.intimidated > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('😨 Intimidated ' + Math.ceil(lp.intimidated) + 's', 22, logY + 1);
+    gameCtx.fillStyle = '#9b59b6';
+    gameCtx.fillText('😨 Intimidated ' + Math.ceil(lp.intimidated) + 's', 20, logY);
+    logY += 18;
+  }
   gameCtx.restore();
 }
 

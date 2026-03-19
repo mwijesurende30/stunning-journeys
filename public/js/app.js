@@ -24,7 +24,6 @@ let selectedMap = 0;
 let currentLobbyCode = null;
 let isHost = false;
 let flowTarget = ''; // 'host' | 'join' | 'single'
-let fighterFlowSource = 'menu'; // 'menu' = browsing, 'game' = picking before starting
 let myColor = '#e94560';
 
 const PLAYER_COLORS = ['#e94560', '#3498db', '#2ecc71', '#f5a623', '#9b59b6'];
@@ -51,13 +50,8 @@ $('#btn-join').addEventListener('click', () => {
   flowTarget = 'join';
   showScreen('screen-name');
 });
-$('#btn-fighters').addEventListener('click', () => {
-  fighterFlowSource = 'menu'; // browsing from main menu
-  populateFighterScreen();
-  showScreen('screen-fighters');
-});
 $('#btn-achievements').addEventListener('click', () => showScreen('screen-achievements'));
-$('#btn-fighters-back').addEventListener('click', () => showScreen('screen-start'));
+$('#btn-fighters-back').addEventListener('click', () => showScreen('screen-name'));
 $('#btn-achievements-back').addEventListener('click', () => showScreen('screen-start'));
 
 // ── Screen: Name input ───────────────────────────────────────
@@ -78,7 +72,6 @@ function submitName() {
   console.log('submitName:', flowTarget, playerName);
 
   // Route through fighter selection before continuing
-  fighterFlowSource = 'game';
   populateFighterScreen();
   showScreen('screen-fighters');
 }
@@ -372,8 +365,8 @@ function populateFighterScreen() {
   el('#fc-desc').textContent = f.description;
   el('#fc-speed').textContent = f.speed;
   el('#fc-heal').textContent = f.healAmount + ' every ' + f.healTick + 's (after ' + f.healDelay + 's)';
-  // Update button text based on context
-  el('#btn-select-fighter').textContent = fighterFlowSource === 'game' ? 'Pick & Play' : 'Select Fighter';
+  // Update button text
+  el('#btn-select-fighter').textContent = 'Pick & Play';
 
   const list = el('#fc-abilities');
   list.innerHTML = '';
@@ -393,19 +386,14 @@ $('#btn-select-fighter').addEventListener('click', () => {
   if (typeof socket !== 'undefined' && socket.emit) {
     socket.emit('change-fighter', { fighterId: selectedFighterId });
   }
-  if (fighterFlowSource === 'game') {
-    // Continue the game flow after picking fighter
-    if (flowTarget === 'host') {
-      socket.emit('host-game', { playerName, mapIndex: selectedMap });
-    } else if (flowTarget === 'single') {
-      const randomMap = Math.floor(Math.random() * MAPS.length);
-      const color = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
-      enterGame(randomMap, [{ id: 'local', name: playerName, color, isHost: true, fighterId: selectedFighterId }]);
-    } else if (flowTarget === 'join') {
-      showScreen('screen-join');
-    }
-  } else {
-    showScreen('screen-start');
+  if (flowTarget === 'host') {
+    socket.emit('host-game', { playerName, mapIndex: selectedMap });
+  } else if (flowTarget === 'single') {
+    const randomMap = Math.floor(Math.random() * MAPS.length);
+    const color = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
+    enterGame(randomMap, [{ id: 'local', name: playerName, color, isHost: true, fighterId: selectedFighterId }]);
+  } else if (flowTarget === 'join') {
+    showScreen('screen-join');
   }
 });
 
