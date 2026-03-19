@@ -8,11 +8,15 @@ let socket;
 try {
   socket = io({
     transports: ['polling', 'websocket'],
+    upgrade: true,
     reconnection: true,
     reconnectionDelay: 1000,
-    timeout: 10000,
+    reconnectionAttempts: 10,
+    timeout: 20000,
   });
+  socket.on('connect', () => console.log('Socket connected:', socket.id));
   socket.on('connect_error', (err) => console.warn('Socket connect error:', err.message));
+  socket.on('disconnect', (reason) => console.warn('Socket disconnected:', reason));
 } catch (e) {
   console.warn('Socket.io init failed:', e);
   socket = { on() {}, emit() {} }; // stub so UI still works

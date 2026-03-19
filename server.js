@@ -8,8 +8,10 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*' },
-  transports: ['websocket', 'polling'],
+  transports: ['polling', 'websocket'],
   allowEIO3: true,
+  pingTimeout: 30000,
+  pingInterval: 10000,
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
