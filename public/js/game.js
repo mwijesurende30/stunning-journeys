@@ -1575,7 +1575,7 @@ function cpuUseSpecial1x(cpu) {
       isSummon: true, summonOwner: cpu.id, summonType: 'zombie',
       summonSpeed: abil.zombieSpeed || 2.0,
       summonDamage: abil.zombieDamage || 100,
-      summonStunDur: 0, summonAttackCD: 1.0, summonAttackTimer: 0,
+      summonStunDur: 0, summonAttackCD: 4.0, summonAttackTimer: 0,
     };
     gamePlayers.push(zombie);
     cpu.zombieIds.push(zombieId);
@@ -2138,7 +2138,7 @@ function useAbility(key) {
           isSummon: true, summonOwner: lp.id, summonType: 'zombie',
           summonSpeed: abil.zombieSpeed || 2.0,
           summonDamage: abil.zombieDamage || 100,
-          summonStunDur: 0, summonAttackCD: 1.0, summonAttackTimer: 0,
+          summonStunDur: 0, summonAttackCD: 4.0, summonAttackTimer: 0,
         };
         gamePlayers.push(zombie);
         lp.zombieIds.push(zombieId);
@@ -3091,8 +3091,8 @@ function renderGame() {
     }
   }
 
-  // Unstable Eye overlay: blur + green outlines on all enemies
-  if (localPlayer && localPlayer.unstableEyeTimer > 0) {
+  // Unstable Eye overlay: blur + green outlines (only visible to the 1x player, overridden by Boiled One)
+  if (localPlayer && localPlayer.unstableEyeTimer > 0 && localPlayer.fighter.id === 'onexonexonex' && !anyBoiledOne) {
     // 60% blur overlay
     gameCtx.fillStyle = 'rgba(0, 40, 0, 0.15)';
     gameCtx.fillRect(0, 0, cw, ch);
