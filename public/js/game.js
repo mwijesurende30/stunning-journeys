@@ -43,6 +43,9 @@ let combatLog = [];    // [{text, timer, color}]
 let spectateIndex = -1;   // index into gamePlayers, -1 = free camera
 let freeCamX = 0, freeCamY = 0;
 
+// Training dummy respawn timer
+let dummyRespawnTimer = 0;
+
 // Game mode: 'training' | 'fight' | undefined (multiplayer)
 let gameMode = undefined;
 
@@ -125,7 +128,7 @@ function startGame(mapIndex, players, myId, mode) {
 
   // Singleplayer mode setup
   if (gameMode === 'training') {
-    // Training: indestructible dummy in center of map
+    // Training: dummy in center of map, 2000 HP, respawns
     const centerR = Math.floor(gameMap.rows / 2);
     const centerC = Math.floor(gameMap.cols / 2);
     const dummySpawn = { r: centerR, c: centerC };
@@ -135,9 +138,10 @@ function startGame(mapIndex, players, myId, mode) {
       dummySpawn,
       dummyFighter
     );
-    dummy.hp = 99999;
-    dummy.maxHp = 99999;
+    dummy.hp = 2000;
+    dummy.maxHp = 2000;
     gamePlayers.push(dummy);
+    dummyRespawnTimer = 0;
   } else if (gameMode === 'fight') {
     // Fight: 4 CPU opponents — 1 easy, 2 medium, 1 hard
     const allFighters = getAllFighterIds();
@@ -470,6 +474,29 @@ function updateGame(dt) {
   // CPU AI update
   if (gameMode === 'fight') {
     updateCPUs(dt);
+  }
+
+  // Training dummy respawn
+  if (gameMode === 'training' && dummyRespawnTimer > 0) {
+    dummyRespawnTimer -= dt;
+    if (dummyRespawnTimer <= 0) {
+      dummyRespawnTimer = 0;
+      // Remove old dummy
+      const oldIdx = gamePlayers.findIndex(p => p.id === 'dummy');
+      if (oldIdx >= 0) gamePlayers.splice(oldIdx, 1);
+      // Spawn new dummy in center
+      const centerR = Math.floor(gameMap.rows / 2);
+      const centerC = Math.floor(gameMap.cols / 2);
+      const dummyFighter = getFighter('fighter');
+      const dummy = createPlayerState(
+        { id: 'dummy', name: 'Training Dummy', color: '#555' },
+        { r: centerR, c: centerC },
+        dummyFighter
+      );
+      dummy.hp = 2000;
+      dummy.maxHp = 2000;
+      gamePlayers.push(dummy);
+    }
   }
 }
 
@@ -1454,6 +1481,10 @@ function dealDamage(attacker, target, amount) {
       freeCamX = target.x;
       freeCamY = target.y;
       spectateIndex = -1;
+    }
+    // Training dummy respawn after 3 seconds
+    if (target.id === 'dummy' && gameMode === 'training') {
+      dummyRespawnTimer = 3;
     }
     // Tell server this player died
     if (typeof socket !== 'undefined' && socket.emit) {
