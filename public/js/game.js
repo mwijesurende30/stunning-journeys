@@ -426,14 +426,14 @@ function updateProjectiles(dt) {
     p.x += p.vx * dt;
     p.y += p.vy * dt;
 
-    // Wall collision (rock/water/out of bounds)
+    // Wall collision (rock blocks, out of bounds = sea destroys)
     const col = Math.floor(p.x / GAME_TILE);
     const row = Math.floor(p.y / GAME_TILE);
     if (col < 0 || col >= gameMap.cols || row < 0 || row >= gameMap.rows) {
       projectiles.splice(i, 1); continue;
     }
     const tile = gameMap.tiles[row][col];
-    if (tile === TILE.ROCK || tile === TILE.WATER) {
+    if (tile === TILE.ROCK) {
       projectiles.splice(i, 1); continue;
     }
 
