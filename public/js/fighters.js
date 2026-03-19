@@ -106,7 +106,7 @@ const FIGHTERS = {
         range: 7,
         type: 'ranged',
         bind: 'e',
-        projectileSpeed: 18,
+        projectileSpeed: 30,
       },
       {
         key: 'R',

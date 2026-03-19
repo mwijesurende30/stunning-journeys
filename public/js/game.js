@@ -321,7 +321,7 @@ function updateGame(dt) {
   const wallDt = Math.min((wallNow - lastWallClock) / 1000, 2); // cap at 2s to avoid huge jumps
   lastWallClock = wallNow;
 
-  // Dead: free camera movement, still tick world state
+  // Dead: free camera movement
   if (!localPlayer.alive) {
     // Free camera movement with WASD
     if (spectateIndex < 0 || !gamePlayers[spectateIndex] || !gamePlayers[spectateIndex].alive) {
@@ -336,28 +336,12 @@ function updateGame(dt) {
       // If spectate target died, reset to free cam
       if (spectateIndex >= 0) spectateIndex = -1;
     }
-    // Still tick world timers for other players
-    for (const p of gamePlayers) {
-      p.effects = p.effects.filter((fx) => { fx.timer -= wallDt; return fx.timer > 0; });
-      if (p.alive && p.hp < p.maxHp) {
-        p.noDamageTimer += wallDt;
-        if (!p.isHealing && p.noDamageTimer >= p.fighter.healDelay) { p.isHealing = true; p.healTickTimer = 0; }
-        if (p.isHealing) { p.healTickTimer -= wallDt; if (p.healTickTimer <= 0) { p.hp = Math.min(p.maxHp, p.hp + p.fighter.healAmount); p.healTickTimer = p.fighter.healTick; } }
-      }
-    }
-    // Tick combat log
-    for (let i = combatLog.length - 1; i >= 0; i--) {
-      combatLog[i].timer -= dt;
-      if (combatLog[i].timer <= 0) combatLog.splice(i, 1);
-    }
-    // Zone timer display
-    const zoneElapsed = (Date.now() - zonePhaseStart) / 1000;
-    zoneTimer = Math.max(0, ZONE_INTERVAL - zoneElapsed);
-    return;
   }
 
-  // Tick cooldowns
-  tickCooldowns(localPlayer, wallDt);
+  // === World simulation (always runs, even when dead) ===
+
+  // Tick cooldowns for local player (only if alive)
+  if (localPlayer.alive) tickCooldowns(localPlayer, wallDt);
 
   // Tick buffs/debuffs for all players
   for (const p of gamePlayers) {
@@ -437,8 +421,8 @@ function updateGame(dt) {
     zoneTimer = ZONE_INTERVAL;
   }
 
-  // Handle special aiming
-  if (localPlayer.specialAiming) {
+  // Handle special aiming (only if alive)
+  if (localPlayer.alive && localPlayer.specialAiming) {
     const cw = gameCanvas.width;
     const ch = gameCanvas.height;
     const camX = localPlayer.x - cw / 2;
@@ -450,12 +434,13 @@ function updateGame(dt) {
     if (localPlayer.specialAimTimer <= 0 || mouseDown) {
       executeSpecialLanding();
     }
-    return; // Skip normal movement while aiming
+    // Skip normal movement while aiming, but continue world sim below
   }
 
-  // Movement
-  if (localPlayer.stunned > 0) return;
-  updateMovement(dt);
+  // Movement (only if alive and not stunned/aiming)
+  if (localPlayer.alive && !localPlayer.specialAiming && localPlayer.stunned <= 0) {
+    updateMovement(dt);
+  }
 
   // Update projectiles
   updateProjectiles(dt);
@@ -466,8 +451,8 @@ function updateGame(dt) {
     if (combatLog[i].timer <= 0) combatLog.splice(i, 1);
   }
 
-  // M1 – auto-fire while mouse held
-  if (mouseDown && localPlayer.cdM1 <= 0) {
+  // M1 – auto-fire while mouse held (only if alive)
+  if (localPlayer.alive && mouseDown && localPlayer.cdM1 <= 0) {
     useAbility('M1');
   }
 
@@ -2159,6 +2144,25 @@ function showPopup(text) {
 function checkWinCondition() {
   if (gameMode === 'fight') {
     const alive = gamePlayers.filter(p => p.alive);
+    // When local player dies, show placement immediately
+    if (!localPlayer.alive && gameRunning) {
+      const place = alive.length + 1; // they were eliminated, so their place = alive count + 1
+      gameRunning = false;
+      const cw = gameCanvas.width;
+      const ch = gameCanvas.height;
+      gameCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      gameCtx.fillRect(0, 0, cw, ch);
+      gameCtx.font = 'bold 36px "Press Start 2P", monospace';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillStyle = '#e94560';
+      const suffix = place === 2 ? 'nd' : place === 3 ? 'rd' : 'th';
+      gameCtx.fillText(place + suffix + ' PLACE', cw / 2, ch / 2);
+      gameCtx.font = 'bold 14px "Press Start 2P", monospace';
+      gameCtx.fillStyle = '#ccc';
+      gameCtx.fillText('Refresh to play again', cw / 2, ch / 2 + 50);
+      return;
+    }
+    // Victory if last alive
     if (alive.length <= 1) {
       gameRunning = false;
       const cw = gameCanvas.width;
@@ -2170,6 +2174,9 @@ function checkWinCondition() {
       if (alive.length === 1 && alive[0].id === localPlayerId) {
         gameCtx.fillStyle = '#2ecc71';
         gameCtx.fillText('VICTORY!', cw / 2, ch / 2);
+        gameCtx.font = 'bold 20px "Press Start 2P", monospace';
+        gameCtx.fillStyle = '#fff';
+        gameCtx.fillText('1st PLACE', cw / 2, ch / 2 + 50);
       } else {
         gameCtx.fillStyle = '#e94560';
         const winnerName = alive.length === 1 ? alive[0].name : 'Nobody';
@@ -2177,7 +2184,7 @@ function checkWinCondition() {
       }
       gameCtx.font = 'bold 14px "Press Start 2P", monospace';
       gameCtx.fillStyle = '#ccc';
-      gameCtx.fillText('Refresh to play again', cw / 2, ch / 2 + 50);
+      gameCtx.fillText('Refresh to play again', cw / 2, ch / 2 + 80);
     }
     return;
   }
