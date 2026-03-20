@@ -1548,6 +1548,23 @@ function cpu1xMassInfection(cpu, target, aimNx, aimNy) {
   if (cpu.supportBuff > 0) dmg *= 1.5;
   if (cpu.intimidated > 0) dmg *= 0.5;
   const baseAngle = Math.atan2(aimNy, aimNx);
+  // Close-range slash: 50 bonus damage to anyone within melee range in front
+  const slashRange = 1.5 * GAME_TILE;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    if (t.isSummon && t.summonOwner === cpu.id) continue;
+    const sdx = t.x - cpu.x; const sdy = t.y - cpu.y;
+    const sDist = Math.sqrt(sdx * sdx + sdy * sdy);
+    if (sDist > slashRange) continue;
+    const toAngle = Math.atan2(sdy, sdx);
+    let angleDiff = toAngle - baseAngle;
+    while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+    while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+    if (Math.abs(angleDiff) > Math.PI / 2) continue;
+    dealDamage(cpu, t, 50);
+  }
+  cpu.effects.push({ type: 'mass-infection-slash', timer: 0.3, aimNx, aimNy });
+  // Invisible shockwave projectiles
   const waveCount = 7;
   const totalSpread = Math.PI;
   const spd = 12 * GAME_TILE / 10;
@@ -1563,7 +1580,6 @@ function cpu1xMassInfection(cpu, target, aimNx, aimNy) {
       poisonDuration: abil.poisonDuration || 3,
     });
   }
-  cpu.effects.push({ type: 'mass-infection', timer: 0.6, aimNx, aimNy });
 }
 
 function cpuUseSpecial1x(cpu) {
@@ -1894,7 +1910,7 @@ function useAbility(key) {
         lp.effects.push({ type: 'eating', timer: (abil.channelTime || 3) + 0.5 });
       }
     } else if (is1x) {
-      // 1X1X1X1 R: Mass Infection — expanding shockwave blocked by cover
+      // 1X1X1X1 R: Mass Infection — close-range slash + invisible expanding shockwave blocked by cover
       const cw = gameCanvas.width; const ch = gameCanvas.height;
       const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
       const aimX = mouseX + camX; const aimY = mouseY + camY;
@@ -1903,7 +1919,27 @@ function useAbility(key) {
       let dmg = abil.damage;
       if (lp.supportBuff > 0) dmg *= 1.5;
       if (lp.intimidated > 0) dmg *= 0.5;
-      // Spawn 7 shockwave projectiles in a wide 180-degree spread
+      // Close-range slash: 50 bonus damage to anyone within melee range (1.5 tiles) in front
+      const slashRange = 1.5 * GAME_TILE;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        const sdx = target.x - lp.x; const sdy = target.y - lp.y;
+        const sDist = Math.sqrt(sdx * sdx + sdy * sdy);
+        if (sDist > slashRange) continue;
+        // Check target is roughly in front (within 90° of aim)
+        const toAngle = Math.atan2(sdy, sdx);
+        let angleDiff = toAngle - baseAngle;
+        while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+        while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+        if (Math.abs(angleDiff) > Math.PI / 2) continue;
+        dealDamage(lp, target, 50);
+        if (typeof socket !== 'undefined' && socket.emit) {
+          socket.emit('player-damage', { targetId: target.id, amount: 50, attackerId: lp.id });
+        }
+      }
+      lp.effects.push({ type: 'mass-infection-slash', timer: 0.3, aimNx: Math.cos(baseAngle), aimNy: Math.sin(baseAngle) });
+      // Spawn 7 invisible shockwave projectiles in a wide 180-degree spread
       const waveCount = 7;
       const totalSpread = Math.PI; // 180 degrees
       const spd = 12 * GAME_TILE / 10; // slower than chips
@@ -1925,7 +1961,6 @@ function useAbility(key) {
       if (typeof socket !== 'undefined' && socket.emit) {
         socket.emit('projectile-spawn', { projectiles: spawnedWaves });
       }
-      lp.effects.push({ type: 'mass-infection', timer: 0.6, aimNx: Math.cos(baseAngle), aimNy: Math.sin(baseAngle) });
       combatLog.push({ text: '☣ Mass Infection!', timer: 3, color: '#00ff66' });
     } else {
       // Fighter: Power Swing
@@ -3026,22 +3061,16 @@ function renderGame() {
       gameCtx.stroke();
     }
 
-    // 1X1X1X1: Mass Infection green shockwave
-    const miFx = p.effects.find((fx) => fx.type === 'mass-infection');
-    if (miFx) {
-      const waveR = GAME_TILE * 4;
+    // 1X1X1X1: Mass Infection close-range slash (green arc at melee range)
+    const miSlashFx = p.effects.find((fx) => fx.type === 'mass-infection-slash');
+    if (miSlashFx) {
+      const swLen = GAME_TILE * 1.5;
       gameCtx.strokeStyle = '#00ff66';
-      gameCtx.lineWidth = 5;
-      const aRad = Math.atan2(miFx.aimNy, miFx.aimNx);
+      gameCtx.lineWidth = 4;
+      const aRad = Math.atan2(miSlashFx.aimNy, miSlashFx.aimNx);
       gameCtx.beginPath();
-      gameCtx.arc(sx, sy, waveR, aRad - Math.PI / 2, aRad + Math.PI / 2);
+      gameCtx.arc(sx, sy, swLen, aRad - Math.PI / 4, aRad + Math.PI / 4);
       gameCtx.stroke();
-      gameCtx.fillStyle = 'rgba(0, 255, 102, 0.12)';
-      gameCtx.beginPath();
-      gameCtx.moveTo(sx, sy);
-      gameCtx.arc(sx, sy, waveR, aRad - Math.PI / 2, aRad + Math.PI / 2);
-      gameCtx.closePath();
-      gameCtx.fill();
     }
 
     // 1X1X1X1: Zombie slash effect (dark green arc)
@@ -3154,23 +3183,8 @@ function renderGame() {
       gameCtx.fill();
       gameCtx.restore();
     } else if (proj.type === 'shockwave') {
-      // Green expanding shockwave arc
-      gameCtx.save();
-      gameCtx.globalAlpha = Math.min(1, proj.timer * 2); // fade out
-      const angle = Math.atan2(proj.vy, proj.vx);
-      // Draw as a thick arc segment
-      gameCtx.strokeStyle = '#00ff66';
-      gameCtx.lineWidth = 6;
-      gameCtx.beginPath();
-      gameCtx.arc(px, py, 10, angle - 0.8, angle + 0.8);
-      gameCtx.stroke();
-      // Inner glow
-      gameCtx.fillStyle = 'rgba(0, 255, 102, 0.35)';
-      gameCtx.beginPath();
-      gameCtx.arc(px, py, 8, 0, Math.PI * 2);
-      gameCtx.fill();
-      gameCtx.globalAlpha = 1.0;
-      gameCtx.restore();
+      // Shockwave projectiles are invisible — the damage wave is unseen
+      // (no rendering needed)
     }
   }
 
