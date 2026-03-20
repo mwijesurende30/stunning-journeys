@@ -228,6 +228,15 @@ io.on('connection', (socket) => {
     }
   });
 
+  // All clients relay their position for smooth movement sync
+  socket.on('player-position', ({ x, y }) => {
+    if (!socket.lobbyCode) return;
+    const lobby = lobbies.get(socket.lobbyCode);
+    if (!lobby) return;
+    // Relay to every other client in the lobby (including host)
+    socket.to(socket.lobbyCode).emit('player-position', { id: socket.id, x, y });
+  });
+
   // Player died — relay to all
   socket.on('player-died', ({ playerId }) => {
     if (!socket.lobbyCode) return;

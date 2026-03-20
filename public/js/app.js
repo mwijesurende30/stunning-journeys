@@ -348,6 +348,13 @@ socket.on('player-input', (input) => {
   }
 });
 
+// Position relay: all clients receive other players' positions
+socket.on('player-position', (data) => {
+  if (typeof onRemotePosition === 'function') {
+    onRemotePosition(data);
+  }
+});
+
 // ── Enter the game screen ────────────────────────────────────
 function enterGame(mapIndex, players, mode) {
   // Inject fighterId for local player

@@ -47,6 +47,7 @@ let combatLog = [];    // [{text, timer, color}]
 // Spectator / dead-camera state
 let spectateIndex = -1;   // index into gamePlayers, -1 = free camera
 let freeCamX = 0, freeCamY = 0;
+let deathOverlayTimer = 0; // seconds since local player died — used to fade out "YOU DIED"
 
 // Training dummy respawn timer
 let dummyRespawnTimer = 0;
@@ -132,13 +133,12 @@ function startGame(mapIndex, players, myId, mode) {
     localPlayerId = localPlayer.id;
   }
 
-  // Determine if we are the host in multiplayer (first player in list is host)
+  // Determine if we are the host in multiplayer
   // mode is undefined for multiplayer, 'training'/'fight' for singleplayer
-  if (gameMode === undefined && players.length > 0 && players[0].isHost) {
-    isHostAuthority = true;
-  } else if (gameMode === undefined) {
-    // Check if our ID matches the first player (host is always first)
-    isHostAuthority = (players[0] && players[0].id === myId);
+  if (gameMode === undefined) {
+    // Check if OUR player entry has isHost flag (not just players[0])
+    const myEntry = players.find(p => p.id === myId);
+    isHostAuthority = !!(myEntry && myEntry.isHost);
   } else {
     isHostAuthority = false; // singleplayer: no network authority needed
   }
@@ -342,18 +342,23 @@ function gameLoop(now) {
   checkWinCondition();
 
   if (typeof socket !== 'undefined' && socket.emit && localPlayer) {
+    // ALL multiplayer clients broadcast own position every 20ms for movement sync
+    if (gameMode === undefined) {
+      if (!gameLoop._lastPosSend || now - gameLoop._lastPosSend > 20) {
+        gameLoop._lastPosSend = now;
+        socket.emit('player-position', { x: localPlayer.x, y: localPlayer.y });
+      }
+    }
     if (isHostAuthority) {
-      // HOST: broadcast full game state snapshot to all clients every ~50ms
-      if (!gameLoop._lastBroadcast || now - gameLoop._lastBroadcast > 50) {
+      // HOST: broadcast full game state snapshot every 20ms
+      if (!gameLoop._lastBroadcast || now - gameLoop._lastBroadcast > 20) {
         gameLoop._lastBroadcast = now;
         const snapshot = buildGameStateSnapshot();
         socket.emit('game-state', snapshot);
-        socket.emit('zone-sync', { zoneInset, zoneTimer });
       }
     } else if (gameMode === undefined) {
-      // NON-HOST CLIENT: send input state to host every frame
+      // NON-HOST: send ability inputs every frame (movement now handled by player-position relay)
       const input = {
-        keys: Object.fromEntries(Object.entries(keys).filter(([,v]) => v)),
         mouseX, mouseY, mouseDown,
         pendingAbilities: localPlayer._pendingAbilities || [],
       };
@@ -371,9 +376,62 @@ function gameLoop(now) {
 function updateGame(dt) {
   if (!localPlayer) return;
 
-  // NON-HOST CLIENT in multiplayer: skip simulation — we only render received state
+  // NON-HOST CLIENT in multiplayer: predict local movement, render visuals, but host runs all combat
   if (gameMode === undefined && !isHostAuthority) {
-    lastWallClock = Date.now(); // keep wall clock current so it doesn't spike on re-enable
+    lastWallClock = Date.now();
+    // Local movement prediction so our own character feels responsive
+    if (localPlayer.alive && !localPlayer.specialAiming && localPlayer.stunned <= 0
+        && !localPlayer.isCraftingChair && !localPlayer.isEatingChair) {
+      updateMovement(dt);
+    }
+    // Tick effect timers locally so visual effects render smoothly (host still sends authoritative effects)
+    for (const p of gamePlayers) {
+      p.effects = p.effects.filter(fx => { fx.timer -= dt; return fx.timer > 0; });
+    }
+    // Move projectiles locally for smooth visuals (host sends authoritative projectiles in snapshot)
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+      const pr = projectiles[i];
+      pr.timer -= dt;
+      if (pr.timer <= 0) { projectiles.splice(i, 1); continue; }
+      pr.x += pr.vx * dt;
+      pr.y += pr.vy * dt;
+      const col = Math.floor(pr.x / GAME_TILE);
+      const row = Math.floor(pr.y / GAME_TILE);
+      if (col < 0 || col >= gameMap.cols || row < 0 || row >= gameMap.rows) {
+        projectiles.splice(i, 1); continue;
+      }
+      if (gameMap.tiles[row][col] === TILE.ROCK) {
+        projectiles.splice(i, 1); continue;
+      }
+    }
+    // Tick combat log
+    for (let i = combatLog.length - 1; i >= 0; i--) {
+      combatLog[i].timer -= dt;
+      if (combatLog[i].timer <= 0) combatLog.splice(i, 1);
+    }
+    // Interpolate remote players toward their target positions (set by snapshots)
+    for (const p of gamePlayers) {
+      if (p.id === localPlayerId) continue;
+      if (p._targetX !== undefined) {
+        p.x += (p._targetX - p.x) * 0.25;
+        p.y += (p._targetY - p.y) * 0.25;
+      }
+    }
+    // Dead: free camera movement and death overlay timer
+    if (!localPlayer.alive) {
+      deathOverlayTimer += dt;
+      if (spectateIndex < 0 || !gamePlayers[spectateIndex] || !gamePlayers[spectateIndex].alive) {
+        let dx = 0, dy = 0;
+        if (keys['ArrowUp']    || keys['w'] || keys['W']) dy -= 1;
+        if (keys['ArrowDown']  || keys['s'] || keys['S']) dy += 1;
+        if (keys['ArrowLeft']  || keys['a'] || keys['A']) dx -= 1;
+        if (keys['ArrowRight'] || keys['d'] || keys['D']) dx += 1;
+        const camSpeed = 6 * GAME_TILE * dt;
+        freeCamX += dx * camSpeed;
+        freeCamY += dy * camSpeed;
+        if (spectateIndex >= 0) spectateIndex = -1;
+      }
+    }
     return;
   }
 
@@ -382,8 +440,9 @@ function updateGame(dt) {
   const wallDt = Math.min((wallNow - lastWallClock) / 1000, 0.1); // cap same as dt to prevent burst damage/cooldowns
   lastWallClock = wallNow;
 
-  // Dead: free camera movement
+  // Dead: free camera movement and death overlay timer
   if (!localPlayer.alive) {
+    deathOverlayTimer += dt;
     // Free camera movement with WASD
     if (spectateIndex < 0 || !gamePlayers[spectateIndex] || !gamePlayers[spectateIndex].alive) {
       let dx = 0, dy = 0;
@@ -401,8 +460,10 @@ function updateGame(dt) {
 
   // === World simulation (always runs, even when dead) ===
 
-  // Tick cooldowns for local player (only if alive)
-  if (localPlayer.alive) tickCooldowns(localPlayer, wallDt);
+  // Tick cooldowns for ALL alive players (host must tick remote players too)
+  for (const p of gamePlayers) {
+    if (p.alive) tickCooldowns(p, wallDt);
+  }
 
   // Tick buffs/debuffs for all players
   for (const p of gamePlayers) {
@@ -443,7 +504,7 @@ function updateGame(dt) {
           p.hp = 0;
           p.alive = false;
           p.effects.push({ type: 'death', timer: 2 });
-          if (p.id === localPlayerId) { freeCamX = p.x; freeCamY = p.y; spectateIndex = -1; }
+          if (p.id === localPlayerId) { freeCamX = p.x; freeCamY = p.y; spectateIndex = -1; deathOverlayTimer = 0; }
         }
       }
     }
@@ -536,7 +597,7 @@ function updateGame(dt) {
         p.hp = 0;
         p.alive = false;
         p.effects.push({ type: 'death', timer: 2 });
-        if (p.id === localPlayerId) { freeCamX = p.x; freeCamY = p.y; spectateIndex = -1; }
+        if (p.id === localPlayerId) { freeCamX = p.x; freeCamY = p.y; spectateIndex = -1; deathOverlayTimer = 0; }
       }
     }
 
@@ -585,13 +646,13 @@ function updateGame(dt) {
     updateMovement(dt);
   }
 
-  // HOST: apply remote inputs for each non-local human player
+  // HOST: apply remote ability inputs (positions come from player-position relay, not keys)
   if (isHostAuthority) {
     for (const p of gamePlayers) {
       if (p.id === localPlayerId || p.isCPU || p.isSummon || !p.alive) continue;
       const inp = remoteInputs[p.id];
       if (!inp) continue;
-      applyRemoteMovement(p, inp, dt);
+      // NOTE: p.x/p.y for remote players is updated by onRemotePosition (no applyRemoteMovement needed)
       if (inp.mouseDown && p.cdM1 <= 0) applyRemoteAbility(p, 'M1', inp);
       if (inp.pendingAbilities && inp.pendingAbilities.length > 0) {
         for (const abilKey of inp.pendingAbilities) applyRemoteAbility(p, abilKey, inp);
@@ -731,10 +792,11 @@ function updateProjectiles(dt) {
       projectiles.splice(i, 1); continue;
     }
 
-    // Hit detection against players (owner's client resolves, or CPU projectiles resolve locally)
+    // Hit detection: host resolves ALL projectile hits; otherwise only local/CPU projectiles
     const isCpuProj = p.ownerId && p.ownerId.startsWith('cpu-');
-    if (p.ownerId === localPlayerId || isCpuProj) {
-      const owner = isCpuProj ? gamePlayers.find(pl => pl.id === p.ownerId) : localPlayer;
+    const isLocalProj = p.ownerId === localPlayerId;
+    if (isLocalProj || isCpuProj || isHostAuthority) {
+      const owner = isLocalProj ? localPlayer : gamePlayers.find(pl => pl.id === p.ownerId);
       for (const target of gamePlayers) {
         if (target.id === p.ownerId || !target.alive) continue;
         if (target.isSummon && target.summonOwner === p.ownerId) continue;
@@ -2391,6 +2453,7 @@ function dealDamage(attacker, target, amount) {
       freeCamX = target.x;
       freeCamY = target.y;
       spectateIndex = -1;
+      deathOverlayTimer = 0;
     }
     // Training dummy respawn after 3 seconds
     if (target.id === 'dummy' && gameMode === 'training') {
@@ -2459,6 +2522,7 @@ function onRemoteDamage(targetId, amount) {
       freeCamX = target.x;
       freeCamY = target.y;
       spectateIndex = -1;
+      deathOverlayTimer = 0;
     }
   }
 }
@@ -3370,23 +3434,30 @@ function renderGame() {
   // Spectator overlay when dead
   if (localPlayer && !localPlayer.alive) {
     gameCtx.save();
-    // Slight dark overlay
-    gameCtx.fillStyle = 'rgba(0,0,0,0.15)';
-    gameCtx.fillRect(0, 0, cw, ch);
-    // "YOU DIED" text
-    gameCtx.font = 'bold 36px "Press Start 2P", monospace';
-    gameCtx.textAlign = 'center';
-    gameCtx.fillStyle = '#000';
-    gameCtx.fillText('YOU DIED', cw / 2 + 2, ch / 2 - 40 + 2);
-    gameCtx.fillStyle = '#8b0000';
-    gameCtx.fillText('YOU DIED', cw / 2, ch / 2 - 40);
-    // Spectator hint
+    // "YOU DIED" fades out after 5 seconds
+    if (deathOverlayTimer < 5) {
+      const fadeAlpha = deathOverlayTimer < 4 ? 1.0 : 1.0 - (deathOverlayTimer - 4);
+      // Slight dark overlay
+      gameCtx.fillStyle = 'rgba(0,0,0,' + (0.15 * fadeAlpha) + ')';
+      gameCtx.fillRect(0, 0, cw, ch);
+      // "YOU DIED" text
+      gameCtx.globalAlpha = fadeAlpha;
+      gameCtx.font = 'bold 36px "Press Start 2P", monospace';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillStyle = '#000';
+      gameCtx.fillText('YOU DIED', cw / 2 + 2, ch / 2 - 40 + 2);
+      gameCtx.fillStyle = '#8b0000';
+      gameCtx.fillText('YOU DIED', cw / 2, ch / 2 - 40);
+      gameCtx.globalAlpha = 1.0;
+    }
+    // Spectator hint (always visible)
     gameCtx.font = 'bold 12px "Press Start 2P", monospace';
+    gameCtx.textAlign = 'center';
     gameCtx.fillStyle = '#ccc';
     if (spectateIndex >= 0 && gamePlayers[spectateIndex]) {
-      gameCtx.fillText('Spectating: ' + gamePlayers[spectateIndex].name, cw / 2, ch / 2);
+      gameCtx.fillText('Spectating: ' + gamePlayers[spectateIndex].name, cw / 2, ch - 40);
     }
-    gameCtx.fillText('TAB = cycle players | WASD = free cam | ESC = free cam', cw / 2, ch / 2 + 24);
+    gameCtx.fillText('TAB = cycle players | WASD = free cam | ESC = free cam', cw / 2, ch - 20);
     gameCtx.restore();
   }
 
@@ -3743,6 +3814,7 @@ function onRemoteProjectiles(ownerId, projs) {
 function buildGameStateSnapshot() {
   const players = gamePlayers.map(p => ({
     id: p.id,
+    name: p.name, color: p.color,
     x: p.x, y: p.y,
     hp: p.hp, maxHp: p.maxHp,
     alive: p.alive,
@@ -3767,8 +3839,8 @@ function buildGameStateSnapshot() {
     chairCharges: p.chairCharges || 0,
     isCraftingChair: p.isCraftingChair || false,
     isEatingChair: p.isEatingChair || false,
-    // visual effects (just types for client to render)
-    effects: (p.effects || []).map(fx => ({ type: fx.type, timer: fx.timer })),
+    // visual effects (include aimNx/aimNy for directional rendering)
+    effects: (p.effects || []).map(fx => ({ type: fx.type, timer: fx.timer, aimNx: fx.aimNx, aimNy: fx.aimNy })),
     // fighter id so client knows what it is
     fighterId: p.fighter ? p.fighter.id : null,
   }));
@@ -3799,16 +3871,29 @@ function onRemoteGameState(snapshot) {
       // New player or summon — create a minimal state
       const fighter = getFighter(sp.fighterId || 'fighter');
       p = createPlayerState(
-        { id: sp.id, name: sp.id, color: '#fff', fighterId: sp.fighterId || 'fighter' },
+        { id: sp.id, name: sp.name || sp.id, color: sp.color || '#fff', fighterId: sp.fighterId || 'fighter' },
         { r: 1, c: 1 }, fighter
       );
-      // Copy over identity fields from existing gamePlayers list if available
-      const existing = gamePlayers.find(x => x.id === sp.id);
-      if (existing) { p.name = existing.name; p.color = existing.color; }
       gamePlayers.push(p);
     }
-    // Patch state from snapshot
-    p.x = sp.x; p.y = sp.y;
+    // Update name/color from snapshot
+    if (sp.name) p.name = sp.name;
+    if (sp.color) p.color = sp.color;
+    // For local player: DON'T overwrite position — local prediction handles movement.
+    // Only accept non-position state from host (HP, alive, effects, etc.)
+    // For remote players: set interpolation target so movement is smooth
+    if (sp.id !== localPlayerId) {
+      p._targetX = sp.x; p._targetY = sp.y;
+      // If first snapshot or teleported far, snap immediately
+      const dx = sp.x - p.x, dy = sp.y - p.y;
+      if (dx * dx + dy * dy > 10000) { p.x = sp.x; p.y = sp.y; }
+    }
+    // Detect death transition for local player (init spectator camera)
+    if (sp.id === localPlayerId && p.alive && !sp.alive) {
+      freeCamX = p.x; freeCamY = p.y;
+      spectateIndex = -1;
+      deathOverlayTimer = 0;
+    }
     p.hp = sp.hp; p.maxHp = sp.maxHp;
     p.alive = sp.alive;
     p.stunned = sp.stunned;
@@ -3843,15 +3928,31 @@ function onRemoteGameState(snapshot) {
 // Host: receive input from a non-host client and store it
 function onRemoteInput(input) {
   if (!isHostAuthority) return;
-  const { playerId, keys: k, mouseX: mx, mouseY: my, mouseDown: md, pendingAbilities: pa } = input;
-  if (!remoteInputs[playerId]) remoteInputs[playerId] = { keys: {}, mouseX: 0, mouseY: 0, mouseDown: false, pendingAbilities: [] };
+  const { playerId, mouseX: mx, mouseY: my, mouseDown: md, pendingAbilities: pa } = input;
+  if (!remoteInputs[playerId]) remoteInputs[playerId] = { mouseX: 0, mouseY: 0, mouseDown: false, pendingAbilities: [] };
   const ri = remoteInputs[playerId];
-  ri.keys = k || {};
   ri.mouseX = mx || 0;
   ri.mouseY = my || 0;
   ri.mouseDown = md || false;
   // Append pending abilities (don't overwrite, accumulate between frames)
   if (pa && pa.length) ri.pendingAbilities.push(...pa);
+}
+
+// Receive a player's world position (relay from server — all clients send their own position)
+function onRemotePosition(data) {
+  const { id, x, y } = data;
+  if (id === localPlayerId) return; // never rewrite own position
+  const p = gamePlayers.find(pl => pl.id === id);
+  if (!p) return;
+  if (isHostAuthority) {
+    // Host: directly update remote player's position for authoritative combat resolution
+    p.x = x; p.y = y;
+  } else {
+    // Non-host: smoothly interpolate toward received position
+    p._targetX = x; p._targetY = y;
+    const dx = x - p.x, dy = y - p.y;
+    if (dx * dx + dy * dy > 10000) { p.x = x; p.y = y; } // teleport-snap if very far
+  }
 }
 
 // Apply movement from a remote input object to a player (host-side)
