@@ -195,7 +195,7 @@ const FIGHTERS = {
         type: 'summon',
         bind: 't',
         companions: {
-          fleshbed: { name: 'Fleshbed', hp: 500, speed: 2.0, damage: 100, stunDuration: 1.5, attackCooldown: 6.5 },
+          fleshbed: { name: 'Fleshbed', hp: 500, speed: 2.0, damage: 100, stunDuration: 0.5, attackCooldown: 6.5 },
           macrocosms: { name: 'Headless Macrocosms', hp: 800, speed: 0.6, damage: 700, stunDuration: 3.0, attackCooldown: 6 },
           obelisk: { name: 'Obelisk of Enlightenment', hp: 999999, speed: 0, damage: 99999, stunDuration: 0, attackCooldown: 0, invincible: true },
         },

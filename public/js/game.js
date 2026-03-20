@@ -1321,8 +1321,16 @@ function cpuAttack(cpu, params) {
       cpu.chipChangeTimer = fighter.abilities[3].duration || 30;
       return;
     } else if (isFilbus) {
-      // Oddity Overthrow: summon a companion
+      // Oddity Overthrow: summon a companion (block if enemy too close)
       if (!cpu.summonId) {
+        const minSummonDist = GAME_TILE * 2;
+        let tooClose = false;
+        for (const other of gamePlayers) {
+          if (other.id === cpu.id || !other.alive || other.isSummon) continue;
+          const sdx = other.x - cpu.x, sdy = other.y - cpu.y;
+          if (Math.sqrt(sdx * sdx + sdy * sdy) < minSummonDist) { tooClose = true; break; }
+        }
+        if (tooClose) return;
         cpu.cdT = fighter.abilities[3].cooldown;
         const abil = fighter.abilities[3];
         const companionKeys = Object.keys(abil.companions);
@@ -2133,6 +2141,16 @@ function useAbility(key) {
         lp.cdT = 5; // short cooldown on dismiss
         combatLog.push({ text: '👋 Companion dismissed', timer: 2, color: '#999' });
       } else {
+        // Block summoning if any enemy is too close (prevents Obelisk instant-kills)
+        const minSummonDist = GAME_TILE * 2;
+        for (const other of gamePlayers) {
+          if (other.id === lp.id || !other.alive || other.isSummon) continue;
+          const sdx = other.x - lp.x, sdy = other.y - lp.y;
+          if (Math.sqrt(sdx * sdx + sdy * sdy) < minSummonDist) {
+            combatLog.push({ text: '⚠ Too close to an enemy to summon!', timer: 2, color: '#e94560' });
+            return;
+          }
+        }
         // Summon a random companion
         const companionKeys = Object.keys(abil.companions);
         const pick = companionKeys[Math.floor(Math.random() * companionKeys.length)];
