@@ -327,10 +327,24 @@ socket.on('player-debuffed', ({ casterId, targetId, type, duration }) => {
   }
 });
 
-// Projectile spawned by another player (visual only)
+// Projectile spawned by another player (visual only — only used in non-host-authoritative fallback)
 socket.on('projectile-spawned', ({ ownerId, projectiles: projs }) => {
   if (typeof onRemoteProjectiles === 'function') {
     onRemoteProjectiles(ownerId, projs);
+  }
+});
+
+// Host-authoritative: full game state snapshot received by non-host clients
+socket.on('game-state', (snapshot) => {
+  if (typeof onRemoteGameState === 'function') {
+    onRemoteGameState(snapshot);
+  }
+});
+
+// Host-authoritative: host receives input from a non-host client
+socket.on('player-input', (input) => {
+  if (typeof onRemoteInput === 'function') {
+    onRemoteInput(input);
   }
 });
 

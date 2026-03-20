@@ -22,6 +22,11 @@ let localPlayerId = null;
 let localPlayer = null;
 let lastTime = 0;
 
+// Host-authoritative multiplayer
+// remoteInputs: map of playerId -> {keys:{}, mouseX, mouseY, mouseDown, pendingAbilities:[]}
+let remoteInputs = {};
+let isHostAuthority = false; // true if we are the host in a multiplayer game
+
 // Zone shrink state
 let zoneInset = 0;        // tiles shrunk from each edge
 let zoneTimer = 40;       // seconds until next shrink
@@ -107,12 +112,13 @@ function startGame(mapIndex, players, myId, mode) {
   zoneTimer = ZONE_INTERVAL;
   zonePhaseStart = Date.now();
 
-  // Reset projectiles
+  // Reset projectiles and network state
   projectiles = [];
   combatLog = [];
   spectateIndex = -1;
   freeCamX = 0;
   freeCamY = 0;
+  remoteInputs = {};
 
   gamePlayers = players.map((p, i) => {
     const spawn = validSpawns[i % validSpawns.length];
@@ -124,6 +130,17 @@ function startGame(mapIndex, players, myId, mode) {
   if (!localPlayer && gamePlayers.length > 0) {
     localPlayer = gamePlayers[0];
     localPlayerId = localPlayer.id;
+  }
+
+  // Determine if we are the host in multiplayer (first player in list is host)
+  // mode is undefined for multiplayer, 'training'/'fight' for singleplayer
+  if (gameMode === undefined && players.length > 0 && players[0].isHost) {
+    isHostAuthority = true;
+  } else if (gameMode === undefined) {
+    // Check if our ID matches the first player (host is always first)
+    isHostAuthority = (players[0] && players[0].id === myId);
+  } else {
+    isHostAuthority = false; // singleplayer: no network authority needed
   }
 
   // Singleplayer mode setup
@@ -291,10 +308,22 @@ function onKeyDown(e) {
   }
 
   // Ability presses (single-fire, not held)
-  if (e.key === 'e' || e.key === 'E') useAbility('E');
-  if (e.key === 'r' || e.key === 'R') useAbility('R');
-  if (e.key === 't' || e.key === 'T') useAbility('T');
-  if (e.key === ' ') useAbility('SPACE');
+  if (e.key === 'e' || e.key === 'E') {
+    if (gameMode === undefined && !isHostAuthority) { if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = []; localPlayer._pendingAbilities.push('E'); }
+    else useAbility('E');
+  }
+  if (e.key === 'r' || e.key === 'R') {
+    if (gameMode === undefined && !isHostAuthority) { if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = []; localPlayer._pendingAbilities.push('R'); }
+    else useAbility('R');
+  }
+  if (e.key === 't' || e.key === 'T') {
+    if (gameMode === undefined && !isHostAuthority) { if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = []; localPlayer._pendingAbilities.push('T'); }
+    else useAbility('T');
+  }
+  if (e.key === ' ') {
+    if (gameMode === undefined && !isHostAuthority) { if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = []; localPlayer._pendingAbilities.push('SPACE'); }
+    else useAbility('SPACE');
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -312,15 +341,24 @@ function gameLoop(now) {
   // Check win condition: last player standing in multiplayer
   checkWinCondition();
 
-  // Broadcast position + HP (throttled to ~20 updates/sec to reduce network load)
   if (typeof socket !== 'undefined' && socket.emit && localPlayer) {
-    if (!gameLoop._lastBroadcast || now - gameLoop._lastBroadcast > 50) {
-      gameLoop._lastBroadcast = now;
-      socket.emit('player-move', { x: localPlayer.x, y: localPlayer.y, hp: localPlayer.hp });
-      // Host syncs zone timer
-      if (isHost) {
+    if (isHostAuthority) {
+      // HOST: broadcast full game state snapshot to all clients every ~50ms
+      if (!gameLoop._lastBroadcast || now - gameLoop._lastBroadcast > 50) {
+        gameLoop._lastBroadcast = now;
+        const snapshot = buildGameStateSnapshot();
+        socket.emit('game-state', snapshot);
         socket.emit('zone-sync', { zoneInset, zoneTimer });
       }
+    } else if (gameMode === undefined) {
+      // NON-HOST CLIENT: send input state to host every frame
+      const input = {
+        keys: Object.fromEntries(Object.entries(keys).filter(([,v]) => v)),
+        mouseX, mouseY, mouseDown,
+        pendingAbilities: localPlayer._pendingAbilities || [],
+      };
+      if (localPlayer._pendingAbilities) localPlayer._pendingAbilities = [];
+      socket.emit('player-input', input);
     }
   }
 
@@ -332,6 +370,12 @@ function gameLoop(now) {
 // ═══════════════════════════════════════════════════════════════
 function updateGame(dt) {
   if (!localPlayer) return;
+
+  // NON-HOST CLIENT in multiplayer: skip simulation — we only render received state
+  if (gameMode === undefined && !isHostAuthority) {
+    lastWallClock = Date.now(); // keep wall clock current so it doesn't spike on re-enable
+    return;
+  }
 
   // Use wall-clock delta for timers, capped to prevent huge jumps on tab-switch
   const wallNow = Date.now();
@@ -541,16 +585,17 @@ function updateGame(dt) {
     updateMovement(dt);
   }
 
-  // Interpolate remote players toward their target positions (smooth network sync)
-  for (const p of gamePlayers) {
-    if (p.id === localPlayerId || p.isCPU || p.isSummon) continue;
-    if (p._targetX !== undefined) {
-      const lerpSpeed = 0.25; // blend factor per frame — fast enough to stay close, smooth enough to hide jitter
-      p.x += (p._targetX - p.x) * lerpSpeed;
-      p.y += (p._targetY - p.y) * lerpSpeed;
-      // Snap if very close to prevent floaty micro-drift
-      if (Math.abs(p._targetX - p.x) < 0.5 && Math.abs(p._targetY - p.y) < 0.5) {
-        p.x = p._targetX; p.y = p._targetY;
+  // HOST: apply remote inputs for each non-local human player
+  if (isHostAuthority) {
+    for (const p of gamePlayers) {
+      if (p.id === localPlayerId || p.isCPU || p.isSummon || !p.alive) continue;
+      const inp = remoteInputs[p.id];
+      if (!inp) continue;
+      applyRemoteMovement(p, inp, dt);
+      if (inp.mouseDown && p.cdM1 <= 0) applyRemoteAbility(p, 'M1', inp);
+      if (inp.pendingAbilities && inp.pendingAbilities.length > 0) {
+        for (const abilKey of inp.pendingAbilities) applyRemoteAbility(p, abilKey, inp);
+        inp.pendingAbilities = [];
       }
     }
   }
@@ -3682,23 +3727,185 @@ function onRemoteDebuff(casterId, targetId, type, duration) {
 }
 
 function onRemoteProjectiles(ownerId, projs) {
-  // Add visual-only projectiles (no damage — owner's client resolves hits)
+  // Legacy: Add visual-only projectiles (used as fallback only)
   for (const p of projs) {
     projectiles.push({
       x: p.x, y: p.y, vx: p.vx, vy: p.vy,
-      ownerId: ownerId, damage: 0, // 0 damage — visual only
+      ownerId: ownerId, damage: 0,
       timer: p.timer, type: p.type,
     });
   }
 }
 
+// ── HOST-AUTHORITATIVE MULTIPLAYER ────────────────────────────
+
+// Build a serialisable snapshot of the full game state for broadcast
+function buildGameStateSnapshot() {
+  const players = gamePlayers.map(p => ({
+    id: p.id,
+    x: p.x, y: p.y,
+    hp: p.hp, maxHp: p.maxHp,
+    alive: p.alive,
+    stunned: p.stunned,
+    // cooldowns
+    cdM1: p.cdM1, cdE: p.cdE, cdR: p.cdR, cdT: p.cdT,
+    // summon identity
+    isSummon: p.isSummon || false,
+    summonOwner: p.summonOwner || null,
+    summonType: p.summonType || null,
+    // buffs/debuffs
+    supportBuff: p.supportBuff,
+    intimidated: p.intimidated,
+    poisonTimers: p.poisonTimers || [],
+    unstableEyeTimer: p.unstableEyeTimer || 0,
+    boiledOneActive: p.boiledOneActive || false,
+    boiledOneTimer: p.boiledOneTimer || 0,
+    specialUnlocked: p.specialUnlocked,
+    specialUsed: p.specialUsed,
+    totalDamageTaken: p.totalDamageTaken,
+    // Filbus
+    chairCharges: p.chairCharges || 0,
+    isCraftingChair: p.isCraftingChair || false,
+    isEatingChair: p.isEatingChair || false,
+    // visual effects (just types for client to render)
+    effects: (p.effects || []).map(fx => ({ type: fx.type, timer: fx.timer })),
+    // fighter id so client knows what it is
+    fighterId: p.fighter ? p.fighter.id : null,
+  }));
+  const projs = projectiles.map(p => ({
+    x: p.x, y: p.y, vx: p.vx, vy: p.vy,
+    type: p.type, timer: p.timer, ownerId: p.ownerId,
+  }));
+  return { players, projectiles: projs, zoneInset, zoneTimer };
+}
+
+// Non-host client: receive full state snapshot from host and apply it
+function onRemoteGameState(snapshot) {
+  if (isHostAuthority) return; // host doesn't process its own broadcast
+
+  // Sync zone
+  zoneInset = snapshot.zoneInset;
+  zoneTimer = snapshot.zoneTimer;
+
+  // Sync players (including summons)
+  const incomingIds = new Set(snapshot.players.map(p => p.id));
+  // Remove players/summons that no longer exist on host
+  for (let i = gamePlayers.length - 1; i >= 0; i--) {
+    if (!incomingIds.has(gamePlayers[i].id)) gamePlayers.splice(i, 1);
+  }
+  for (const sp of snapshot.players) {
+    let p = gamePlayers.find(x => x.id === sp.id);
+    if (!p) {
+      // New player or summon — create a minimal state
+      const fighter = getFighter(sp.fighterId || 'fighter');
+      p = createPlayerState(
+        { id: sp.id, name: sp.id, color: '#fff', fighterId: sp.fighterId || 'fighter' },
+        { r: 1, c: 1 }, fighter
+      );
+      // Copy over identity fields from existing gamePlayers list if available
+      const existing = gamePlayers.find(x => x.id === sp.id);
+      if (existing) { p.name = existing.name; p.color = existing.color; }
+      gamePlayers.push(p);
+    }
+    // Patch state from snapshot
+    p.x = sp.x; p.y = sp.y;
+    p.hp = sp.hp; p.maxHp = sp.maxHp;
+    p.alive = sp.alive;
+    p.stunned = sp.stunned;
+    p.cdM1 = sp.cdM1; p.cdE = sp.cdE; p.cdR = sp.cdR; p.cdT = sp.cdT;
+    p.isSummon = sp.isSummon; p.summonOwner = sp.summonOwner; p.summonType = sp.summonType;
+    p.supportBuff = sp.supportBuff;
+    p.intimidated = sp.intimidated;
+    p.poisonTimers = sp.poisonTimers || [];
+    p.unstableEyeTimer = sp.unstableEyeTimer || 0;
+    p.boiledOneActive = sp.boiledOneActive || false;
+    p.boiledOneTimer = sp.boiledOneTimer || 0;
+    p.specialUnlocked = sp.specialUnlocked;
+    p.specialUsed = sp.specialUsed;
+    p.totalDamageTaken = sp.totalDamageTaken;
+    p.chairCharges = sp.chairCharges || 0;
+    p.isCraftingChair = sp.isCraftingChair || false;
+    p.isEatingChair = sp.isEatingChair || false;
+    if (sp.effects) p.effects = sp.effects;
+  }
+
+  // Sync projectiles (replace entirely with host's list)
+  projectiles = snapshot.projectiles.map(sp => ({
+    x: sp.x, y: sp.y, vx: sp.vx, vy: sp.vy,
+    type: sp.type, timer: sp.timer, ownerId: sp.ownerId,
+    damage: 0, // client doesn't resolve damage — host does
+  }));
+
+  // Re-bind localPlayer reference (could have been replaced above)
+  localPlayer = gamePlayers.find(p => p.id === localPlayerId);
+}
+
+// Host: receive input from a non-host client and store it
+function onRemoteInput(input) {
+  if (!isHostAuthority) return;
+  const { playerId, keys: k, mouseX: mx, mouseY: my, mouseDown: md, pendingAbilities: pa } = input;
+  if (!remoteInputs[playerId]) remoteInputs[playerId] = { keys: {}, mouseX: 0, mouseY: 0, mouseDown: false, pendingAbilities: [] };
+  const ri = remoteInputs[playerId];
+  ri.keys = k || {};
+  ri.mouseX = mx || 0;
+  ri.mouseY = my || 0;
+  ri.mouseDown = md || false;
+  // Append pending abilities (don't overwrite, accumulate between frames)
+  if (pa && pa.length) ri.pendingAbilities.push(...pa);
+}
+
+// Apply movement from a remote input object to a player (host-side)
+function applyRemoteMovement(p, inp, dt) {
+  if (!p.alive || p.stunned > 0 || p.isCraftingChair || p.isEatingChair || p.specialAiming) return;
+  let dx = 0, dy = 0;
+  const k = inp.keys || {};
+  if (k['ArrowUp']   || k['w'] || k['W']) dy -= 1;
+  if (k['ArrowDown'] || k['s'] || k['S']) dy += 1;
+  if (k['ArrowLeft'] || k['a'] || k['A']) dx -= 1;
+  if (k['ArrowRight']|| k['d'] || k['D']) dx += 1;
+  if (dx === 0 && dy === 0) return;
+  if (dx !== 0 && dy !== 0) { const len = Math.sqrt(2); dx /= len; dy /= len; }
+  let speed = p.fighter.speed;
+  if (p.unstableEyeTimer > 0) speed *= 1.3;
+  const move = speed * dt * 60;
+  const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
+  const newX = p.x + dx * move;
+  const newY = p.y + dy * move;
+  if (canMoveTo(newX, p.y, radius)) p.x = newX;
+  if (canMoveTo(p.x, newY, radius)) p.y = newY;
+}
+
+// Apply an ability for a remote player (host-side) — swaps localPlayer context temporarily
+function applyRemoteAbility(p, abilKey, inp) {
+  // Temporarily swap localPlayer so useAbility() works for this player
+  const savedLocal = localPlayer;
+  const savedLocalId = localPlayerId;
+  const savedMouseX = mouseX;
+  const savedMouseY = mouseY;
+  const savedMouseDown = mouseDown;
+  localPlayer = p;
+  localPlayerId = p.id;
+  // Transform the remote player's mouse coords to world coords
+  // inp.mouseX/Y are screen coords; we need to translate via their position as camera centre
+  const cw = gameCanvas.width, ch = gameCanvas.height;
+  const camX = p.x - cw / 2, camY = p.y - ch / 2;
+  mouseX = inp.mouseX;
+  mouseY = inp.mouseY;
+  mouseDown = inp.mouseDown || false;
+  try { useAbility(abilKey); } catch(e) { /* ignore errors from remote ability */ }
+  localPlayer = savedLocal;
+  localPlayerId = savedLocalId;
+  mouseX = savedMouseX;
+  mouseY = savedMouseY;
+  mouseDown = savedMouseDown;
+}
+
 function onPlayerMove(id, x, y, hp) {
+  // Legacy handler — only used if host-authoritative is not active
+  if (isHostAuthority) return;
   const p = gamePlayers.find((pl) => pl.id === id);
   if (p && p.id !== localPlayerId) {
-    // Store target position for smooth interpolation instead of snapping
-    p._targetX = x;
-    p._targetY = y;
-    // Each player is authoritative over their own HP — trust their broadcast
+    p.x = x; p.y = y;
     if (hp !== undefined) p.hp = hp;
   }
 }

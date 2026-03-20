@@ -206,6 +206,28 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ── HOST-AUTHORITATIVE STATE BROADCAST ──────────────────────
+  // Host sends full game state snapshot every ~50ms; relay to all non-host clients
+  socket.on('game-state', (snapshot) => {
+    if (!socket.lobbyCode) return;
+    const lobby = lobbies.get(socket.lobbyCode);
+    if (!lobby || lobby.host !== socket.id) return; // only host can broadcast state
+    // Relay snapshot to all NON-host players in the lobby
+    socket.to(socket.lobbyCode).emit('game-state', snapshot);
+  });
+
+  // Non-host clients send their input state to host each frame
+  socket.on('player-input', (input) => {
+    if (!socket.lobbyCode) return;
+    const lobby = lobbies.get(socket.lobbyCode);
+    if (!lobby || lobby.host === socket.id) return; // only non-hosts send input
+    // Relay input to host only
+    const hostSocket = io.sockets.sockets.get(lobby.host);
+    if (hostSocket) {
+      hostSocket.emit('player-input', { playerId: socket.id, ...input });
+    }
+  });
+
   // Player died — relay to all
   socket.on('player-died', ({ playerId }) => {
     if (!socket.lobbyCode) return;
