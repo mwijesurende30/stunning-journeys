@@ -312,12 +312,15 @@ function gameLoop(now) {
   // Check win condition: last player standing in multiplayer
   checkWinCondition();
 
-  // Broadcast position + HP
+  // Broadcast position + HP (throttled to ~20 updates/sec to reduce network load)
   if (typeof socket !== 'undefined' && socket.emit && localPlayer) {
-    socket.emit('player-move', { x: localPlayer.x, y: localPlayer.y, hp: localPlayer.hp });
-    // Host syncs zone timer every frame
-    if (isHost) {
-      socket.emit('zone-sync', { zoneInset, zoneTimer });
+    if (!gameLoop._lastBroadcast || now - gameLoop._lastBroadcast > 50) {
+      gameLoop._lastBroadcast = now;
+      socket.emit('player-move', { x: localPlayer.x, y: localPlayer.y, hp: localPlayer.hp });
+      // Host syncs zone timer
+      if (isHost) {
+        socket.emit('zone-sync', { zoneInset, zoneTimer });
+      }
     }
   }
 
@@ -537,6 +540,20 @@ function updateGame(dt) {
     updateMovement(dt);
   }
 
+  // Interpolate remote players toward their target positions (smooth network sync)
+  for (const p of gamePlayers) {
+    if (p.id === localPlayerId || p.isCPU || p.isSummon) continue;
+    if (p._targetX !== undefined) {
+      const lerpSpeed = 0.25; // blend factor per frame — fast enough to stay close, smooth enough to hide jitter
+      p.x += (p._targetX - p.x) * lerpSpeed;
+      p.y += (p._targetY - p.y) * lerpSpeed;
+      // Snap if very close to prevent floaty micro-drift
+      if (Math.abs(p._targetX - p.x) < 0.5 && Math.abs(p._targetY - p.y) < 0.5) {
+        p.x = p._targetX; p.y = p._targetY;
+      }
+    }
+  }
+
   // Update projectiles
   updateProjectiles(dt);
 
@@ -551,9 +568,9 @@ function updateGame(dt) {
     useAbility('M1');
   }
 
-  // CPU AI update
+  // CPU AI update (use wallDt for consistent timer behaviour with player)
   if (gameMode === 'fight') {
-    updateCPUs(dt);
+    updateCPUs(wallDt);
   }
 
   // Training dummy respawn
@@ -619,8 +636,9 @@ function updateMovement(dt) {
     }
   }
 
-  const newX = localPlayer.x + dx * speed;
-  const newY = localPlayer.y + dy * speed;
+  const move = speed * dt * 60; // frame-rate independent: same effective speed at any FPS
+  const newX = localPlayer.x + dx * move;
+  const newY = localPlayer.y + dy * move;
   const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
 
   if (canMoveTo(newX, localPlayer.y, radius)) localPlayer.x = newX;
@@ -1072,8 +1090,9 @@ function cpuMove(cpu, dt, params) {
     }
   }
 
-  const newX = cpu.x + moveX * speed;
-  const newY = cpu.y + moveY * speed;
+  const move = speed * dt * 60; // frame-rate independent
+  const newX = cpu.x + moveX * move;
+  const newY = cpu.y + moveY * move;
   if (canMoveTo(newX, cpu.y, radius)) cpu.x = newX;
   if (canMoveTo(cpu.x, newY, radius)) cpu.y = newY;
 }
@@ -2347,7 +2366,11 @@ function onRemoteDamage(targetId, amount) {
 
 function onRemoteKnockback(targetId, x, y) {
   const target = gamePlayers.find((p) => p.id === targetId);
-  if (target) { target.x = x; target.y = y; }
+  if (target) {
+    target.x = x; target.y = y;
+    // Also snap the interpolation target so it doesn't lerp back to old position
+    target._targetX = x; target._targetY = y;
+  }
 }
 
 function onZoneSync(newInset, newTimer) {
@@ -3588,8 +3611,9 @@ function onRemoteProjectiles(ownerId, projs) {
 function onPlayerMove(id, x, y, hp) {
   const p = gamePlayers.find((pl) => pl.id === id);
   if (p && p.id !== localPlayerId) {
-    p.x = x;
-    p.y = y;
+    // Store target position for smooth interpolation instead of snapping
+    p._targetX = x;
+    p._targetY = y;
     if (hp !== undefined) p.hp = hp;
   }
 }

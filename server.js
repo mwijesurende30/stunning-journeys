@@ -146,16 +146,29 @@ io.on('connection', (socket) => {
     });
   });
 
-  // In-game movement + HP broadcast
+  // In-game movement + HP broadcast (with validation)
   socket.on('player-move', ({ x, y, hp }) => {
-    if (socket.lobbyCode) {
-      socket.to(socket.lobbyCode).emit('player-moved', {
-        id: socket.id,
-        x,
-        y,
-        hp,
-      });
-    }
+    if (!socket.lobbyCode) return;
+    // Validate types: must be finite numbers
+    if (typeof x !== 'number' || typeof y !== 'number' || typeof hp !== 'number') return;
+    if (!isFinite(x) || !isFinite(y) || !isFinite(hp)) return;
+    // Clamp position to reasonable bounds (50 cols * 48 tile = 2400, generous margin)
+    const maxCoord = 5000;
+    const cx = Math.max(0, Math.min(x, maxCoord));
+    const cy = Math.max(0, Math.min(y, maxCoord));
+    // Clamp HP: 0 to 5000 (generous cap for any fighter)
+    const chp = Math.max(0, Math.min(hp, 5000));
+    // Rate-limit: max ~30 updates/sec per socket
+    const now = Date.now();
+    if (!socket._lastMove) socket._lastMove = 0;
+    if (now - socket._lastMove < 30) return; // drop if too fast
+    socket._lastMove = now;
+    socket.to(socket.lobbyCode).emit('player-moved', {
+      id: socket.id,
+      x: cx,
+      y: cy,
+      hp: chp,
+    });
   });
 
   // Relay damage events from attacker to all clients (with validation)
@@ -171,15 +184,16 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Relay knockback
+  // Relay knockback (with position validation)
   socket.on('player-knockback', ({ targetId, x, y }) => {
-    if (socket.lobbyCode) {
-      socket.to(socket.lobbyCode).emit('player-knockedback', {
-        targetId,
-        x,
-        y,
-      });
-    }
+    if (!socket.lobbyCode) return;
+    if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) return;
+    const maxCoord = 5000;
+    socket.to(socket.lobbyCode).emit('player-knockedback', {
+      targetId,
+      x: Math.max(0, Math.min(x, maxCoord)),
+      y: Math.max(0, Math.min(y, maxCoord)),
+    });
   });
 
   // Host broadcasts zone timer to keep everyone in sync
