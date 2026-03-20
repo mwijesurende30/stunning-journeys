@@ -1575,7 +1575,7 @@ function cpu1xMassInfection(cpu, target, aimNx, aimNy) {
     projectiles.push({
       x: cpu.x, y: cpu.y, vx, vy,
       ownerId: cpu.id, damage: dmg,
-      timer: 1.0, type: 'shockwave',
+      timer: 10.0, type: 'shockwave',
       poisonDPS: abil.poisonDPS || 50,
       poisonDuration: abil.poisonDuration || 3,
     });
@@ -1951,12 +1951,12 @@ function useAbility(key) {
         const proj = {
           x: lp.x, y: lp.y, vx, vy,
           ownerId: lp.id, damage: dmg,
-          timer: 1.0, type: 'shockwave',
+          timer: 10.0, type: 'shockwave',
           poisonDPS: abil.poisonDPS || 50,
           poisonDuration: abil.poisonDuration || 3,
         };
         projectiles.push(proj);
-        spawnedWaves.push({ x: lp.x, y: lp.y, vx, vy, timer: 1.0, type: 'shockwave' });
+        spawnedWaves.push({ x: lp.x, y: lp.y, vx, vy, timer: 10.0, type: 'shockwave' });
       }
       if (typeof socket !== 'undefined' && socket.emit) {
         socket.emit('projectile-spawn', { projectiles: spawnedWaves });
