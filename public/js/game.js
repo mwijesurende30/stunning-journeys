@@ -673,10 +673,14 @@ function updateProjectiles(dt) {
       const owner = isCpuProj ? gamePlayers.find(pl => pl.id === p.ownerId) : localPlayer;
       for (const target of gamePlayers) {
         if (target.id === p.ownerId || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === p.ownerId) continue;
+        // Shockwave: skip already-hit targets
+        if (p.hitTargets && p.hitTargets.has(target.id)) continue;
         const dx = target.x - p.x;
         const dy = target.y - p.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < radius + 4) {
+        const hitRadius = p.type === 'shockwave' ? radius + 12 : radius + 4;
+        if (dist < hitRadius) {
           dealDamage(owner, target, p.damage);
           // Log gamble card hits
           if (p.type === 'card') {
@@ -706,6 +710,16 @@ function updateProjectiles(dt) {
               socket.emit('player-debuff', { targetId: target.id, type: 'stun', duration: stunDur });
             }
             combatLog.push({ text: '⚔ Entangled ' + target.name + '!', timer: 3, color: '#00ff66' });
+          }
+          // Shockwave: apply poison, passes through enemies (don't splice)
+          if (p.type === 'shockwave') {
+            if (!target.poisonTimers) target.poisonTimers = [];
+            target.poisonTimers.push({ sourceId: p.ownerId, dps: p.poisonDPS || 50, remaining: p.poisonDuration || 3 });
+            target.effects.push({ type: 'poison', timer: p.poisonDuration || 3 });
+            // Mark this target as already hit by this wave so it doesn't double-hit
+            if (!p.hitTargets) p.hitTargets = new Set();
+            p.hitTargets.add(target.id);
+            continue; // don't splice — shockwave passes through
           }
           projectiles.splice(i, 1);
           break;
@@ -756,10 +770,10 @@ function updateSummons(dt) {
       if (bestTarget) {
         const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const speed = s.summonSpeed;
+        const moveSpeed = s.summonSpeed * GAME_TILE * dt;
         const nx = dx / dist; const ny = dy / dist;
-        const newX = s.x + nx * speed;
-        const newY = s.y + ny * speed;
+        const newX = s.x + nx * moveSpeed;
+        const newY = s.y + ny * moveSpeed;
         if (canMoveTo(newX, s.y, radius)) s.x = newX;
         if (canMoveTo(s.x, newY, radius)) s.y = newY;
         // Attack when in range and off cooldown
@@ -776,10 +790,10 @@ function updateSummons(dt) {
       if (bestTarget) {
         const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const speed = s.summonSpeed;
+        const moveSpeed = s.summonSpeed * GAME_TILE * dt;
         const nx = dx / dist; const ny = dy / dist;
-        const newX = s.x + nx * speed;
-        const newY = s.y + ny * speed;
+        const newX = s.x + nx * moveSpeed;
+        const newY = s.y + ny * moveSpeed;
         if (canMoveTo(newX, s.y, radius)) s.x = newX;
         if (canMoveTo(s.x, newY, radius)) s.y = newY;
         // Attack within melee range
@@ -796,10 +810,10 @@ function updateSummons(dt) {
       if (bestTarget) {
         const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const speed = s.summonSpeed;
+        const moveSpeed = s.summonSpeed * GAME_TILE * dt;
         const nx = dx / dist; const ny = dy / dist;
-        const newX = s.x + nx * speed;
-        const newY = s.y + ny * speed;
+        const newX = s.x + nx * moveSpeed;
+        const newY = s.y + ny * moveSpeed;
         if (canMoveTo(newX, s.y, radius)) s.x = newX;
         if (canMoveTo(s.x, newY, radius)) s.y = newY;
         // Slash attack within melee range
@@ -1511,22 +1525,24 @@ function cpu1xMassInfection(cpu, target, aimNx, aimNy) {
   const fighter = cpu.fighter;
   const abil = fighter.abilities[2];
   cpu.cdR = abil.cooldown;
-  const range = (abil.range || 4) * GAME_TILE;
-  let baseDmg = abil.damage;
-  if (cpu.supportBuff > 0) baseDmg *= 1.5;
-  if (cpu.intimidated > 0) baseDmg *= 0.5;
-  for (const t of gamePlayers) {
-    if (t.id === cpu.id || !t.alive) continue;
-    if (t.isSummon && t.summonOwner === cpu.id) continue;
-    const dx = t.x - cpu.x; const dy = t.y - cpu.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist > range) continue;
-    const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
-    if (dot < -0.1) continue;
-    dealDamage(cpu, t, baseDmg);
-    if (!t.poisonTimers) t.poisonTimers = [];
-    t.poisonTimers.push({ sourceId: cpu.id, dps: abil.poisonDPS || 50, remaining: abil.poisonDuration || 3 });
-    t.effects.push({ type: 'poison', timer: abil.poisonDuration || 3 });
+  let dmg = abil.damage;
+  if (cpu.supportBuff > 0) dmg *= 1.5;
+  if (cpu.intimidated > 0) dmg *= 0.5;
+  const baseAngle = Math.atan2(aimNy, aimNx);
+  const waveCount = 7;
+  const totalSpread = Math.PI;
+  const spd = 12 * GAME_TILE / 10;
+  for (let i = 0; i < waveCount; i++) {
+    const angle = baseAngle + (i - (waveCount - 1) / 2) * (totalSpread / (waveCount - 1));
+    const vx = Math.cos(angle) * spd;
+    const vy = Math.sin(angle) * spd;
+    projectiles.push({
+      x: cpu.x, y: cpu.y, vx, vy,
+      ownerId: cpu.id, damage: dmg,
+      timer: 1.0, type: 'shockwave',
+      poisonDPS: abil.poisonDPS || 50,
+      poisonDuration: abil.poisonDuration || 3,
+    });
   }
   cpu.effects.push({ type: 'mass-infection', timer: 0.6, aimNx, aimNy });
 }
@@ -1859,33 +1875,38 @@ function useAbility(key) {
         lp.effects.push({ type: 'eating', timer: (abil.channelTime || 3) + 0.5 });
       }
     } else if (is1x) {
-      // 1X1X1X1 R: Mass Infection — wide horizontal shockwave + poison
-      const range = (abil.range || 4) * GAME_TILE;
-      let baseDmg = abil.damage;
-      if (lp.supportBuff > 0) baseDmg *= 1.5;
-      if (lp.intimidated > 0) baseDmg *= 0.5;
+      // 1X1X1X1 R: Mass Infection — expanding shockwave blocked by cover
       const cw = gameCanvas.width; const ch = gameCanvas.height;
       const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
       const aimX = mouseX + camX; const aimY = mouseY + camY;
       const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
-      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
-      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
-      for (const target of gamePlayers) {
-        if (target.id === lp.id || !target.alive) continue;
-        if (target.isSummon && target.summonOwner === lp.id) continue;
-        const dx = target.x - lp.x; const dy = target.y - lp.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist > range) continue;
-        // Wide angle — 180 degrees (dot product >= -0.1)
-        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
-        if (dot < -0.1) continue;
-        dealDamage(lp, target, baseDmg);
-        // Apply poison
-        if (!target.poisonTimers) target.poisonTimers = [];
-        target.poisonTimers.push({ sourceId: lp.id, dps: abil.poisonDPS || 50, remaining: abil.poisonDuration || 3 });
-        target.effects.push({ type: 'poison', timer: abil.poisonDuration || 3 });
+      const baseAngle = Math.atan2(aimDy, aimDx);
+      let dmg = abil.damage;
+      if (lp.supportBuff > 0) dmg *= 1.5;
+      if (lp.intimidated > 0) dmg *= 0.5;
+      // Spawn 7 shockwave projectiles in a wide 180-degree spread
+      const waveCount = 7;
+      const totalSpread = Math.PI; // 180 degrees
+      const spd = 12 * GAME_TILE / 10; // slower than chips
+      const spawnedWaves = [];
+      for (let i = 0; i < waveCount; i++) {
+        const angle = baseAngle + (i - (waveCount - 1) / 2) * (totalSpread / (waveCount - 1));
+        const vx = Math.cos(angle) * spd;
+        const vy = Math.sin(angle) * spd;
+        const proj = {
+          x: lp.x, y: lp.y, vx, vy,
+          ownerId: lp.id, damage: dmg,
+          timer: 1.0, type: 'shockwave',
+          poisonDPS: abil.poisonDPS || 50,
+          poisonDuration: abil.poisonDuration || 3,
+        };
+        projectiles.push(proj);
+        spawnedWaves.push({ x: lp.x, y: lp.y, vx, vy, timer: 1.0, type: 'shockwave' });
       }
-      lp.effects.push({ type: 'mass-infection', timer: 0.6, aimNx, aimNy });
+      if (typeof socket !== 'undefined' && socket.emit) {
+        socket.emit('projectile-spawn', { projectiles: spawnedWaves });
+      }
+      lp.effects.push({ type: 'mass-infection', timer: 0.6, aimNx: Math.cos(baseAngle), aimNy: Math.sin(baseAngle) });
       combatLog.push({ text: '☣ Mass Infection!', timer: 3, color: '#00ff66' });
     } else {
       // Fighter: Power Swing
@@ -3108,6 +3129,24 @@ function renderGame() {
       gameCtx.beginPath();
       gameCtx.arc(0, 0, 8, 0, Math.PI * 2);
       gameCtx.fill();
+      gameCtx.restore();
+    } else if (proj.type === 'shockwave') {
+      // Green expanding shockwave arc
+      gameCtx.save();
+      gameCtx.globalAlpha = Math.min(1, proj.timer * 2); // fade out
+      const angle = Math.atan2(proj.vy, proj.vx);
+      // Draw as a thick arc segment
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 6;
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 10, angle - 0.8, angle + 0.8);
+      gameCtx.stroke();
+      // Inner glow
+      gameCtx.fillStyle = 'rgba(0, 255, 102, 0.35)';
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 8, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.globalAlpha = 1.0;
       gameCtx.restore();
     }
   }
