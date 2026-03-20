@@ -3061,16 +3061,28 @@ function renderGame() {
       gameCtx.stroke();
     }
 
-    // 1X1X1X1: Mass Infection close-range slash (green arc at melee range)
+    // 1X1X1X1: Mass Infection close-range slash (dramatic green burst, distinct from M1)
     const miSlashFx = p.effects.find((fx) => fx.type === 'mass-infection-slash');
     if (miSlashFx) {
-      const swLen = GAME_TILE * 1.5;
-      gameCtx.strokeStyle = '#00ff66';
-      gameCtx.lineWidth = 4;
       const aRad = Math.atan2(miSlashFx.aimNy, miSlashFx.aimNx);
+      // Filled green wedge — much more dramatic than the thin M1 arc
+      const wedgeR = GAME_TILE * 2;
+      gameCtx.save();
+      gameCtx.globalAlpha = 0.5;
+      gameCtx.fillStyle = '#00ff66';
       gameCtx.beginPath();
-      gameCtx.arc(sx, sy, swLen, aRad - Math.PI / 4, aRad + Math.PI / 4);
+      gameCtx.moveTo(sx, sy);
+      gameCtx.arc(sx, sy, wedgeR, aRad - Math.PI / 3, aRad + Math.PI / 3);
+      gameCtx.closePath();
+      gameCtx.fill();
+      gameCtx.globalAlpha = 1.0;
+      // Bright outline arc
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 5;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, wedgeR, aRad - Math.PI / 3, aRad + Math.PI / 3);
       gameCtx.stroke();
+      gameCtx.restore();
     }
 
     // 1X1X1X1: Zombie slash effect (dark green arc)
@@ -3183,8 +3195,17 @@ function renderGame() {
       gameCtx.fill();
       gameCtx.restore();
     } else if (proj.type === 'shockwave') {
-      // Shockwave projectiles are invisible — the damage wave is unseen
-      // (no rendering needed)
+      // Subtle green ripple so the shockwave is visible but not overwhelming
+      gameCtx.save();
+      gameCtx.globalAlpha = Math.min(0.6, proj.timer * 0.3);
+      const angle = Math.atan2(proj.vy, proj.vx);
+      gameCtx.strokeStyle = '#00ff66';
+      gameCtx.lineWidth = 3;
+      gameCtx.beginPath();
+      gameCtx.arc(px, py, 6, angle - 0.6, angle + 0.6);
+      gameCtx.stroke();
+      gameCtx.globalAlpha = 1.0;
+      gameCtx.restore();
     }
   }
 
