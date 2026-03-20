@@ -112,7 +112,7 @@ function buildMapGrid() {
 }
 
 $('#btn-host-create').addEventListener('click', () => {
-  socket.emit('host-game', { playerName, mapIndex: selectedMap });
+  socket.emit('host-game', { playerName, mapIndex: selectedMap, fighterId: selectedFighterId });
 });
 $('#btn-host-map-back').addEventListener('click', () => showScreen('screen-name'));
 
@@ -128,7 +128,7 @@ function submitJoin() {
     return;
   }
   $('#join-error').textContent = '';
-  socket.emit('join-game', { playerName, code });
+  socket.emit('join-game', { playerName, code, fighterId: selectedFighterId });
 }
 
 // ── Screen: Lobby ────────────────────────────────────────────
@@ -191,9 +191,11 @@ function refreshPlayerList(players) {
   players.forEach((p) => {
     const div = document.createElement('div');
     div.className = 'player-item';
+    const fighterName = (typeof getFighter === 'function' && p.fighterId) ? getFighter(p.fighterId).name : '';
     div.innerHTML =
       `<span class="player-dot" style="background:${p.color}"></span>` +
       `<span>${escapeHtml(p.name)}</span>` +
+      (fighterName ? `<span style="opacity:0.6;margin-left:6px;font-size:0.85em">(${escapeHtml(fighterName)})</span>` : '') +
       (p.isHost ? '<span class="host-badge">Host</span>' : '');
     list.appendChild(div);
   });
@@ -415,7 +417,7 @@ $('#btn-select-fighter').addEventListener('click', () => {
     socket.emit('change-fighter', { fighterId: selectedFighterId });
   }
   if (flowTarget === 'host') {
-    socket.emit('host-game', { playerName, mapIndex: selectedMap });
+    socket.emit('host-game', { playerName, mapIndex: selectedMap, fighterId: selectedFighterId });
   } else if (flowTarget === 'training') {
     const randomMap = Math.floor(Math.random() * MAPS.length);
     const color = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];

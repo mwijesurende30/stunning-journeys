@@ -36,7 +36,7 @@ io.on('connection', (socket) => {
   console.log(`Player connected: ${socket.id}`);
 
   // HOST a new game
-  socket.on('host-game', ({ playerName, mapIndex }) => {
+  socket.on('host-game', ({ playerName, mapIndex, fighterId }) => {
     const code = generateCode();
     const lobby = {
       host: socket.id,
@@ -44,7 +44,7 @@ io.on('connection', (socket) => {
       players: new Map(),
     };
     const color = PLAYER_COLORS[0];
-    lobby.players.set(socket.id, { name: playerName, color, fighterId: 'fighter' });
+    lobby.players.set(socket.id, { name: playerName, color, fighterId: fighterId || 'fighter' });
     lobbies.set(code, lobby);
     socket.join(code);
     socket.lobbyCode = code;
@@ -59,7 +59,7 @@ io.on('connection', (socket) => {
   });
 
   // JOIN an existing game
-  socket.on('join-game', ({ playerName, code }) => {
+  socket.on('join-game', ({ playerName, code, fighterId }) => {
     const upperCode = (code || '').toUpperCase().trim();
     const lobby = lobbies.get(upperCode);
 
@@ -74,7 +74,7 @@ io.on('connection', (socket) => {
 
     const available = getAvailableColors(lobby);
     const color = available[0] || '#ffffff';
-    lobby.players.set(socket.id, { name: playerName, color, fighterId: 'fighter' });
+    lobby.players.set(socket.id, { name: playerName, color, fighterId: fighterId || 'fighter' });
     socket.join(upperCode);
     socket.lobbyCode = upperCode;
 
