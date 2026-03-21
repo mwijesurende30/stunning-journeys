@@ -145,7 +145,7 @@ function startGame(mapIndex, players, myId, mode) {
 
   // Singleplayer mode setup
   if (gameMode === 'training') {
-    // Training: dummy in center of map, 2000 HP, respawns
+    // Training: dummy in center + a practice bot that fights back
     const centerR = Math.floor(gameMap.rows / 2);
     const centerC = Math.floor(gameMap.cols / 2);
     const dummySpawn = { r: centerR, c: centerC };
@@ -155,14 +155,31 @@ function startGame(mapIndex, players, myId, mode) {
       dummySpawn,
       dummyFighter
     );
-    dummy.hp = 2000;
-    dummy.maxHp = 2000;
+    dummy.hp = 3000;
+    dummy.maxHp = 3000;
     gamePlayers.push(dummy);
     dummyRespawnTimer = 0;
+    // Spawn a practice bot that fights back (easy difficulty)
+    const botFighters = getAllFighterIds().filter(f => f !== localPlayer.fighter.id);
+    const botFighterId = botFighters[Math.floor(Math.random() * botFighters.length)];
+    const botFighter = getFighter(botFighterId);
+    const botSpawn = validSpawns[1] || { r: centerR + 3, c: centerC + 3 };
+    const bot = createPlayerState(
+      { id: 'training-bot', name: 'Sparring Partner', color: '#4a90d9', fighterId: botFighterId },
+      botSpawn,
+      botFighter
+    );
+    bot.isCPU = true;
+    bot.difficulty = 'easy';
+    bot.aiState = {
+      moveTarget: null, attackTarget: null, thinkTimer: 0, abilityTimer: 0,
+      lastSeenPositions: {}, strafeDir: Math.random() < 0.5 ? 1 : -1, retreating: false,
+    };
+    gamePlayers.push(bot);
   } else if (gameMode === 'fight') {
-    // Fight: 4 CPU opponents — 1 easy, 2 medium, 1 hard
+    // Fight: 4 CPU opponents — 1 easy, 1 medium, 1 hard, 1 hard
     const allFighters = getAllFighterIds();
-    const difficulties = ['easy', 'medium', 'medium', 'hard'];
+    const difficulties = ['easy', 'medium', 'hard', 'hard'];
     const shuffledNames = CPU_NAMES.slice().sort(() => Math.random() - 0.5);
     const shuffledColors = CPU_COLORS.slice().sort(() => Math.random() - 0.5);
     for (let i = 0; i < 4; i++) {
@@ -232,6 +249,7 @@ function createPlayerState(p, spawn, fighter) {
     specialUsed: false,
     // Buffs / debuffs
     supportBuff: 0,        // seconds remaining of 50% dmg boost
+    buffSlowed: 0,         // seconds remaining of Buff slow debuff
     intimidated: 0,        // seconds remaining of intimidation debuff
     intimidatedBy: null,   // id of the fighter who intimidated
     stunned: 0,            // seconds of stun remaining
@@ -280,6 +298,29 @@ function createPlayerState(p, spawn, fighter) {
     iglooX: 0,              // igloo center x
     iglooY: 0,              // igloo center y
     iglooTimer: 0,          // igloo active timer
+    // Noli-specific state
+    noliVoidRushActive: false,  // currently dashing
+    noliVoidRushVx: 0,
+    noliVoidRushVy: 0,
+    noliVoidRushTimer: 0,
+    noliVoidRushChain: 0,       // 0=none, increments each hit (unlimited)
+    noliVoidRushChainTimer: 0,  // seconds left to use chain
+    noliVoidRushLastHitId: null, // can't hit same target consecutively
+    noliVoidStarAiming: false,
+    noliVoidStarAimX: 0,
+    noliVoidStarAimY: 0,
+    noliVoidStarTimer: 0,
+    noliObservantUses: 0,       // uses this game (max 3)
+    noliCloneId: null,          // id of hallucination clone
+    // Exploding Cat-specific state
+    catCards: 0,                // saved cat cards
+    catStolenAbil: null,        // {fighterId, abilIndex} saved stolen ability
+    catStolenReady: false,      // true = next R fires the stolen move
+    catAttackBuff: 0,           // seconds remaining of scratch buff
+    catSeerTimer: 0,            // reveal the future timer
+    catNopeTimer: 0,            // global nope timer (blocks a random ability)
+    catNopeAbility: null,       // which ability key is noped ('E','R','T')
+    catKittenIds: [],            // ids of exploding kitten summons
   };
 }
 
@@ -338,8 +379,10 @@ function onKeyDown(e) {
     if (gameMode === undefined && !isHostAuthority) {
       if (!localPlayer._pendingAbilities) localPlayer._pendingAbilities = [];
       localPlayer._pendingAbilities.push('SPACE');
-      // Also trigger local aiming mode for visual feedback
-      if (localPlayer.specialUnlocked && !localPlayer.specialUsed && localPlayer.alive && localPlayer.stunned <= 0) {
+      // Also trigger local aiming mode for visual feedback (not for Noli — instant special)
+      if (localPlayer.specialUnlocked && !localPlayer.specialUsed && localPlayer.alive && localPlayer.stunned <= 0
+          && localPlayer.fighter.id !== 'noli'
+          && localPlayer.fighter.id !== 'explodingcat') {
         localPlayer.specialAiming = true;
         localPlayer.specialAimX = localPlayer.x;
         localPlayer.specialAimY = localPlayer.y;
@@ -384,8 +427,11 @@ function gameLoop(now) {
       }
     } else if (gameMode === undefined) {
       // NON-HOST: send ability inputs every frame (movement now handled by player-position relay)
+      // Send world-space aim coordinates so host canvas size doesn't matter
+      const cw = gameCanvas.width, ch = gameCanvas.height;
+      const camX = localPlayer.x - cw / 2, camY = localPlayer.y - ch / 2;
       const input = {
-        mouseX, mouseY, mouseDown,
+        aimWorldX: mouseX + camX, aimWorldY: mouseY + camY, mouseDown,
         pendingAbilities: localPlayer._pendingAbilities || [],
       };
       if (localPlayer._pendingAbilities) localPlayer._pendingAbilities = [];
@@ -505,6 +551,7 @@ function updateGame(dt) {
   // Tick buffs/debuffs for all players
   for (const p of gamePlayers) {
     if (p.supportBuff > 0) p.supportBuff = Math.max(0, p.supportBuff - wallDt);
+    if (p.buffSlowed > 0) p.buffSlowed = Math.max(0, p.buffSlowed - wallDt);
     if (p.intimidated > 0) {
       p.intimidated = Math.max(0, p.intimidated - wallDt);
       if (p.intimidated <= 0) p.intimidatedBy = null;
@@ -512,7 +559,7 @@ function updateGame(dt) {
     if (p.stunned > 0) p.stunned = Math.max(0, p.stunned - wallDt);
 
     // Auto-heal: if not damaged for healDelay seconds, heal healAmount every healTick
-    if (p.alive && p.hp < p.maxHp) {
+    if (p.alive && p.hp < p.maxHp && !p.noCloneHeal) {
       p.noDamageTimer += wallDt;
       if (!p.isHealing && p.noDamageTimer >= p.fighter.healDelay) {
         p.isHealing = true;
@@ -684,6 +731,171 @@ function updateGame(dt) {
       }
     }
 
+    // Tick Exploding Cat timers
+    if (p.catAttackBuff > 0) p.catAttackBuff = Math.max(0, p.catAttackBuff - wallDt);
+    if (p.catSeerTimer > 0) p.catSeerTimer = Math.max(0, p.catSeerTimer - wallDt);
+    if (p.catNopeTimer > 0) p.catNopeTimer = Math.max(0, p.catNopeTimer - wallDt);
+
+    // Tick Noli Void Rush dash
+    if (p.noliVoidRushActive && p.alive) {
+      p.noliVoidRushTimer -= wallDt;
+      // Steer toward mouse (local player only) or toward target (CPU)
+      const abil = p.fighter && p.fighter.abilities[1];
+      const chain = p.noliVoidRushChain || 0;
+      const steerBase = abil ? (abil.steerRate || 8) : 8;
+      const steerDecay = abil ? (abil.steerDecayPerChain || 1.0) : 1.0;
+      const minSteer = abil ? (abil.minSteerRate || 2) : 2;
+      const steerRate = Math.max(minSteer, steerBase - chain * steerDecay);
+      if (p.id === localPlayerId) {
+        // Steer with WASD / arrow keys
+        let steerDx = 0, steerDy = 0;
+        if (keys['ArrowUp']    || keys['w'] || keys['W']) steerDy -= 1;
+        if (keys['ArrowDown']  || keys['s'] || keys['S']) steerDy += 1;
+        if (keys['ArrowLeft']  || keys['a'] || keys['A']) steerDx -= 1;
+        if (keys['ArrowRight'] || keys['d'] || keys['D']) steerDx += 1;
+        if (steerDx !== 0 || steerDy !== 0) {
+          const steerLen = Math.sqrt(steerDx * steerDx + steerDy * steerDy);
+          const wantNx = steerDx / steerLen;
+          const wantNy = steerDy / steerLen;
+          const curSpeed = Math.sqrt(p.noliVoidRushVx * p.noliVoidRushVx + p.noliVoidRushVy * p.noliVoidRushVy) || 1;
+          const curNx = p.noliVoidRushVx / curSpeed;
+          const curNy = p.noliVoidRushVy / curSpeed;
+          const blendAmt = Math.min(1, steerRate * wallDt);
+          const newNx = curNx + (wantNx - curNx) * blendAmt;
+          const newNy = curNy + (wantNy - curNy) * blendAmt;
+          const newDist = Math.sqrt(newNx * newNx + newNy * newNy) || 1;
+          p.noliVoidRushVx = (newNx / newDist) * curSpeed;
+          p.noliVoidRushVy = (newNy / newDist) * curSpeed;
+        }
+      }
+      // Only update position for local player and CPU; remote player position comes from relay
+      if (p.id === localPlayerId || p.isCPU) {
+        p.x += p.noliVoidRushVx * wallDt * 60;
+        p.y += p.noliVoidRushVy * wallDt * 60;
+      }
+      // Store trail position
+      if (!p._voidRushTrail) p._voidRushTrail = [];
+      p._voidRushTrail.push({ x: p.x, y: p.y, t: 0.3 });
+      // Check if hit a player
+      let hitSomeone = false;
+      for (const t of gamePlayers) {
+        if (t.id === p.id || !t.alive || (t.isSummon && t.summonOwner === p.id)) continue;
+        if (t.id === p.noliVoidRushLastHitId) continue; // can't hit same target consecutively
+        const dx = t.x - p.x, dy = t.y - p.y;
+        if (Math.sqrt(dx * dx + dy * dy) < GAME_TILE * 1.5) {
+          // Hit! Unlimited chain — damage & speed scale up each hit
+          const chain = p.noliVoidRushChain;
+          const abil = p.fighter && p.fighter.abilities[1];
+          const baseDmg = abil ? abil.damage : 300;
+          const perChain = abil ? (abil.damagePerChain || 100) : 100;
+          let dmg = baseDmg + chain * perChain;
+          if (p.supportBuff > 0) dmg *= 1.5;
+          if (p.intimidated > 0) dmg *= 0.5;
+          dealDamage(p, t, Math.round(dmg));
+          p.noliVoidRushActive = false;
+          p.noliVoidRushLastHitId = t.id;
+          p.noliVoidRushChain = chain + 1;
+          p.noliVoidRushChainTimer = (abil ? abil.chainWindow : 3);
+          p.cdE = 0; // can use E again immediately
+          p.effects.push({ type: 'void-rush-hit', timer: 0.3 });
+          hitSomeone = true;
+          break;
+        }
+      }
+      // Check if hit wall/out of bounds
+      if (!hitSomeone && p.noliVoidRushActive) {
+        const mapW = gameMap.cols * GAME_TILE, mapH = gameMap.rows * GAME_TILE;
+        const tileR = Math.floor(p.y / GAME_TILE), tileC = Math.floor(p.x / GAME_TILE);
+        const outOfBounds = p.x < 0 || p.y < 0 || p.x > mapW || p.y > mapH;
+        const onRock = (tileR >= 0 && tileR < gameMap.rows && tileC >= 0 && tileC < gameMap.cols) ? (gameMap.tiles[tileR][tileC] === TILE.ROCK) : true;
+        const onSea = (tileR >= 0 && tileR < gameMap.rows && tileC >= 0 && tileC < gameMap.cols) ? (gameMap.tiles[tileR][tileC] === TILE.WATER) : true;
+        if (outOfBounds || onRock || onSea) {
+          const lostChain = p.noliVoidRushChain;
+          p.noliVoidRushActive = false;
+          p.noliVoidRushChain = 0;
+          p.noliVoidRushChainTimer = 0;
+          p.noliVoidRushLastHitId = null;
+          const baseMissStun = (p.fighter && p.fighter.abilities[1]) ? p.fighter.abilities[1].missStun : 2;
+          const missStun = baseMissStun + lostChain * 0.3; // higher chain = longer stun
+          p.stunned = Math.max(p.stunned, missStun);
+          p.effects.push({ type: 'stun', timer: missStun });
+          // 30s cooldown on miss
+          p.cdE = 30;
+          // Push back to valid position
+          p.x = Math.max(GAME_TILE, Math.min(mapW - GAME_TILE, p.x - p.noliVoidRushVx * wallDt * 60 * 2));
+          p.y = Math.max(GAME_TILE, Math.min(mapH - GAME_TILE, p.y - p.noliVoidRushVy * wallDt * 60 * 2));
+          combatLog.push({ text: '💫 Void Rush missed! (30s CD)' + (lostChain > 0 ? ' chain ' + lostChain + ' lost' : ''), timer: 2, color: '#a020f0' });
+        }
+      }
+      // Void Rush is infinite — only ends on wall/sea hit or player hit (no timer timeout)
+    }
+    // Tick Noli Void Rush chain window
+    if (p.noliVoidRushChainTimer > 0) {
+      p.noliVoidRushChainTimer -= wallDt;
+      if (p.noliVoidRushChainTimer <= 0) {
+        p.noliVoidRushChain = 0;
+        p.noliVoidRushLastHitId = null;
+      }
+    }
+    // Decay Void Rush trail
+    if (p._voidRushTrail && p._voidRushTrail.length > 0) {
+      for (let ti = p._voidRushTrail.length - 1; ti >= 0; ti--) {
+        p._voidRushTrail[ti].t -= wallDt;
+        if (p._voidRushTrail[ti].t <= 0) p._voidRushTrail.splice(ti, 1);
+      }
+    }
+    // Tick Noli Void Star aiming
+    if (p.noliVoidStarAiming && p.alive) {
+      // Track mouse position each frame (local player)
+      if (p.id === localPlayerId) {
+        const cw = gameCanvas.width, ch = gameCanvas.height;
+        const camX = p.x - cw / 2, camY = p.y - ch / 2;
+        p.noliVoidStarAimX = mouseX + camX;
+        p.noliVoidStarAimY = mouseY + camY;
+      }
+      p.noliVoidStarTimer -= wallDt;
+      // Fire on timer expire, local click, or remote click
+      let remoteClick = false;
+      if (isHostAuthority && p.id !== localPlayerId && remoteInputs[p.id]) {
+        remoteClick = remoteInputs[p.id].mouseDown;
+      }
+      if (p.noliVoidStarTimer <= 0 || (p.id === localPlayerId && mouseDown) || remoteClick) {
+        // Throw the star
+        p.noliVoidStarAiming = false;
+        const abil = p.fighter && p.fighter.abilities[2];
+        const starR = (abil ? abil.radius || 1.5 : 1.5) * GAME_TILE;
+        const dmg = abil ? abil.damage : 300;
+        for (const t of gamePlayers) {
+          if (t.id === p.id || !t.alive) continue;
+          if (t.isSummon && t.summonOwner === p.id) continue;
+          const dx = t.x - p.noliVoidStarAimX, dy = t.y - p.noliVoidStarAimY;
+          if (Math.sqrt(dx * dx + dy * dy) < starR) {
+            let d = dmg;
+            if (p.supportBuff > 0) d *= 1.5;
+            if (p.intimidated > 0) d *= 0.5;
+            dealDamage(p, t, Math.round(d));
+          }
+        }
+        // Self-stun after throwing
+        const selfStun = abil ? abil.selfStun || 2 : 2;
+        p.stunned = Math.max(p.stunned, selfStun);
+        p.effects.push({ type: 'void-star-throw', timer: 0.5 });
+        p.effects.push({ type: 'stun', timer: selfStun });
+        combatLog.push({ text: '⭐ Void Star thrown!', timer: 2, color: '#a020f0' });
+      }
+    }
+    // Noli: check if clone is still alive
+    if (p.noliCloneId) {
+      const clone = gamePlayers.find(x => x.id === p.noliCloneId);
+      if (!clone || !clone.alive) {
+        if (clone) {
+          const idx = gamePlayers.findIndex(x => x.id === p.noliCloneId);
+          if (idx >= 0) gamePlayers.splice(idx, 1);
+        }
+        p.noliCloneId = null;
+      }
+    }
+
     // Cricket: check if wickets are still alive (both must survive)
     if (p.wicketIds && p.wicketIds.length === 2) {
       const w0 = gamePlayers.find(x => x.id === p.wicketIds[0]);
@@ -732,9 +944,10 @@ function updateGame(dt) {
     // Skip normal movement while aiming, but continue world sim below
   }
 
-  // Movement (only if alive and not stunned/aiming/channeling)
+  // Movement (only if alive and not stunned/aiming/channeling/dashing)
   if (localPlayer.alive && !localPlayer.specialAiming && localPlayer.stunned <= 0
-      && !localPlayer.isCraftingChair && !localPlayer.isEatingChair) {
+      && !localPlayer.isCraftingChair && !localPlayer.isEatingChair
+      && !localPlayer.noliVoidRushActive && !localPlayer.noliVoidStarAiming) {
     updateMovement(dt);
   }
 
@@ -747,10 +960,8 @@ function updateGame(dt) {
 
       // Tick special aiming for remote players (host processes aim timer + landing)
       if (p.specialAiming) {
-        const cw = gameCanvas.width, ch = gameCanvas.height;
-        const camX = p.x - cw / 2, camY = p.y - ch / 2;
-        p.specialAimX = (inp.mouseX || 0) + camX;
-        p.specialAimY = (inp.mouseY || 0) + camY;
+        p.specialAimX = inp.aimWorldX || 0;
+        p.specialAimY = inp.aimWorldY || 0;
         p.specialAimTimer -= wallDt;
         if (p.specialAimTimer <= 0 || inp.mouseDown) {
           // Swap context and call executeSpecialLanding for this remote player
@@ -759,6 +970,12 @@ function updateGame(dt) {
           executeSpecialLanding();
           localPlayer = savedLP; localPlayerId = savedLPID;
         }
+      }
+
+      // Tick Void Star aiming for remote players (host tracks aim + fires)
+      if (p.noliVoidStarAiming) {
+        p.noliVoidStarAimX = inp.aimWorldX || 0;
+        p.noliVoidStarAimY = inp.aimWorldY || 0;
       }
 
       // NOTE: p.x/p.y for remote players is updated by onRemotePosition (no applyRemoteMovement needed)
@@ -806,8 +1023,8 @@ function updateGame(dt) {
         { r: centerR, c: centerC },
         dummyFighter
       );
-      dummy.hp = 2000;
-      dummy.maxHp = 2000;
+      dummy.hp = 3000;
+      dummy.maxHp = 3000;
       gamePlayers.push(dummy);
     }
   }
@@ -843,6 +1060,8 @@ function updateMovement(dt) {
   if (localPlayer.unstableEyeTimer > 0) speed *= 1.3;
   // Cricket Gear Up: slower speed
   if (localPlayer.gearUpTimer > 0) speed *= 0.6;
+  // Buff slow debuff
+  if (localPlayer.buffSlowed > 0) speed *= 0.6;
   // Cricket Wicket line: 50% speed boost when on the line between both wickets
   if (localPlayer.wicketIds && localPlayer.wicketIds.length === 2) {
     const w0 = gamePlayers.find(p => p.id === localPlayer.wicketIds[0]);
@@ -857,14 +1076,23 @@ function updateMovement(dt) {
       if (distToLine < GAME_TILE * 1.5) speed *= 1.5;
     }
   }
-  // Intimidation: move 1.5× faster when moving AWAY from intimidator
+  // Intimidation: cannot move TOWARD the intimidator (within 3.5 tile range)
   if (localPlayer.intimidated > 0 && localPlayer.intimidatedBy) {
     const src = gamePlayers.find((p) => p.id === localPlayer.intimidatedBy);
     if (src) {
-      const awayX = localPlayer.x - src.x;
-      const awayY = localPlayer.y - src.y;
-      const dot = dx * awayX + dy * awayY;
-      if (dot > 0) speed *= 1.5; // moving away
+      const towardX = src.x - localPlayer.x;
+      const towardY = src.y - localPlayer.y;
+      const towardDist = Math.sqrt(towardX * towardX + towardY * towardY) || 1;
+      if (towardDist < GAME_TILE * 3.5) {
+        const towardNx = towardX / towardDist;
+        const towardNy = towardY / towardDist;
+        // Project movement onto toward-direction; if positive, strip that component
+        const dot = dx * towardNx + dy * towardNy;
+        if (dot > 0) {
+          dx -= dot * towardNx;
+          dy -= dot * towardNy;
+        }
+      }
     }
   }
   // Deer Fear: 50% speed boost when moving away from the enemy who was closest at cast
@@ -1029,6 +1257,7 @@ function updateProjectiles(dt) {
 function updateSummons(dt) {
   for (const s of gamePlayers) {
     if (!s.isSummon || !s.alive) continue;
+    if (s.summonType === 'noli-clone') continue; // Noli clones use full CPU AI
     if (s.stunned > 0) continue;
 
     const owner = gamePlayers.find(p => p.id === s.summonOwner);
@@ -1135,6 +1364,31 @@ function updateSummons(dt) {
         s.summonAttackTimer = s.summonAttackCD;
         s.effects.push({ type: 'robot-fire', timer: 0.3 });
       }
+    } else if (s.summonType === 'exploding-kitten') {
+      // Exploding Kitten: chase nearest enemy and explode on contact
+      if (bestTarget) {
+        const dx = bestTarget.x - s.x; const dy = bestTarget.y - s.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const moveSpeed = (s.summonSpeed || 2.5) * GAME_TILE * dt;
+        const nx = dx / dist; const ny = dy / dist;
+        const newX = s.x + nx * moveSpeed;
+        const newY = s.y + ny * moveSpeed;
+        if (canMoveTo(newX, s.y, radius)) s.x = newX;
+        if (canMoveTo(s.x, newY, radius)) s.y = newY;
+        // Explode on touch (dot overlap)
+        if (dist < radius * 2) {
+          dealDamage(owner || s, bestTarget, s.summonDamage);
+          combatLog.push({ text: '💥 Kitten exploded on ' + bestTarget.name + '! (' + s.summonDamage + ' dmg)', timer: 3, color: '#ff4444' });
+          s.alive = false;
+          s.hp = 0;
+          s.effects.push({ type: 'death', timer: 2 });
+          // Remove from owner's kitten list
+          if (owner && owner.catKittenIds) {
+            const kidx = owner.catKittenIds.indexOf(s.id);
+            if (kidx >= 0) owner.catKittenIds.splice(kidx, 1);
+          }
+        }
+      }
     }
 
     // Clean up summon if owner died
@@ -1152,9 +1406,9 @@ function updateSummons(dt) {
 
 // Difficulty tuning
 const AI_PARAMS = {
-  easy:   { thinkDelay: 1.2, aimError: 0.35, abilityDelay: 3.0, aggroRange: 7, retreatHp: 0.15, reactionTime: 0.8 },
-  medium: { thinkDelay: 0.6, aimError: 0.18, abilityDelay: 1.5, aggroRange: 10, retreatHp: 0.25, reactionTime: 0.4 },
-  hard:   { thinkDelay: 0.25, aimError: 0.06, abilityDelay: 0.7, aggroRange: 14, retreatHp: 0.35, reactionTime: 0.15 },
+  easy:   { thinkDelay: 1.0, aimError: 0.30, abilityDelay: 2.5, aggroRange: 8,  retreatHp: 0.15, reactionTime: 0.7 },
+  medium: { thinkDelay: 0.5, aimError: 0.15, abilityDelay: 1.2, aggroRange: 11, retreatHp: 0.25, reactionTime: 0.35 },
+  hard:   { thinkDelay: 0.2, aimError: 0.05, abilityDelay: 0.6, aggroRange: 15, retreatHp: 0.35, reactionTime: 0.12 },
 };
 
 function updateCPUs(dt) {
@@ -1213,6 +1467,7 @@ function cpuChooseTarget(cpu, params) {
   for (const p of gamePlayers) {
     if (p.id === cpu.id || !p.alive) continue;
     if (p.isSummon && p.summonOwner === cpu.id) continue; // skip own summons
+    if (p.id === cpu.summonOwner) continue; // summons don't attack their owner
     // Check if CPU can see the player (not hidden in grass)
     if (cpuIsHidden(p, cpu)) continue;
     const dx = p.x - cpu.x; const dy = p.y - cpu.y;
@@ -1292,6 +1547,8 @@ function cpuMove(cpu, dt, params) {
   if (cpu.unstableEyeTimer > 0) speed *= 1.3;
   // Gear Up: speed penalty
   if (cpu.gearUpTimer > 0) speed *= (cpu.fighter.abilities[2].speedPenalty || 0.6);
+  // Buff slow debuff
+  if (cpu.buffSlowed > 0) speed *= 0.6;
   // Deer Fear: speed boost when retreating
   if (cpu.deerFearTimer > 0 && ai.retreating) speed *= 1.5;
   // Deer: slower while building robot
@@ -1328,8 +1585,29 @@ function cpuMove(cpu, dt, params) {
         const perpY = dx / (dist || 1);
         goalX = cpu.x + perpX * ai.strafeDir * GAME_TILE * 2;
         goalY = cpu.y + perpY * ai.strafeDir * GAME_TILE * 2;
-        // Randomly switch strafe direction
-        if (Math.random() < 0.01) ai.strafeDir *= -1;
+        // Switch strafe direction more frequently (harder CPUs strafe more)
+        const strafeFlipChance = cpu.difficulty === 'hard' ? 0.04 : cpu.difficulty === 'medium' ? 0.025 : 0.01;
+        if (Math.random() < strafeFlipChance) ai.strafeDir *= -1;
+      }
+    }
+    // Projectile dodge: sidestep incoming projectiles (medium/hard only)
+    if (cpu.difficulty !== 'easy') {
+      for (const proj of projectiles) {
+        if (proj.ownerId === cpu.id) continue;
+        const pdx = proj.x - cpu.x, pdy = proj.y - cpu.y;
+        const pDist = Math.sqrt(pdx * pdx + pdy * pdy);
+        if (pDist > GAME_TILE * 3) continue;
+        // Check if projectile is heading toward us
+        const projSpeed = Math.sqrt(proj.vx * proj.vx + proj.vy * proj.vy) || 1;
+        const dot = (proj.vx * pdx + proj.vy * pdy) / (projSpeed * pDist);
+        if (dot < -0.5) {
+          // Projectile is heading at us — dodge perpendicular
+          const dodgeX = -proj.vy / projSpeed;
+          const dodgeY = proj.vx / projSpeed;
+          goalX = cpu.x + dodgeX * ai.strafeDir * GAME_TILE * 2;
+          goalY = cpu.y + dodgeY * ai.strafeDir * GAME_TILE * 2;
+          break;
+        }
       }
     }
   } else if (ai.moveTarget) {
@@ -1406,6 +1684,25 @@ function cpuMove(cpu, dt, params) {
     }
   }
 
+  // Intimidation: cannot move TOWARD the intimidator (within 3.5 tile range)
+  if (cpu.intimidated > 0 && cpu.intimidatedBy) {
+    const src = gamePlayers.find((p) => p.id === cpu.intimidatedBy);
+    if (src) {
+      const towardX = src.x - cpu.x;
+      const towardY = src.y - cpu.y;
+      const towardDist = Math.sqrt(towardX * towardX + towardY * towardY) || 1;
+      if (towardDist < GAME_TILE * 3.5) {
+        const towardNx = towardX / towardDist;
+        const towardNy = towardY / towardDist;
+        const dot = moveX * towardNx + moveY * towardNy;
+        if (dot > 0) {
+          moveX -= dot * towardNx;
+          moveY -= dot * towardNy;
+        }
+      }
+    }
+  }
+
   const move = speed * dt * 60; // frame-rate independent
   const newX = cpu.x + moveX * move;
   const newY = cpu.y + moveY * move;
@@ -1426,6 +1723,8 @@ function cpuAttack(cpu, params) {
   const is1x = fighter.id === 'onexonexonex';
   const isCricket = fighter.id === 'cricket';
   const isDeer = fighter.id === 'deer';
+  const isNoli = fighter.id === 'noli';
+  const isCat = fighter.id === 'explodingcat';
 
   // Add aim error based on difficulty
   const errorAngle = (Math.random() - 0.5) * params.aimError * 2;
@@ -1461,6 +1760,16 @@ function cpuAttack(cpu, params) {
     } else if (isDeer) {
       if (dist < 10 * GAME_TILE) {
         cpuUseSpecialDeer(cpu, target);
+        return;
+      }
+    } else if (isNoli) {
+      // Clone closest fighter
+      cpuUseSpecialNoli(cpu);
+      return;
+    } else if (isCat) {
+      // Exploding Kitten: spawn kittens when enemy nearby
+      if (dist < 10 * GAME_TILE) {
+        cpuUseSpecialCat(cpu);
         return;
       }
     } else {
@@ -1507,10 +1816,31 @@ function cpuAttack(cpu, params) {
         cpu.effects.push({ type: 'deer-fear', timer: fighter.abilities[1].duration || 5 });
         return;
       }
+    } else if (isNoli) {
+      // Void Rush: dash toward target
+      if (!cpu.noliVoidRushActive && !cpu.noliVoidStarAiming && dist < 8 * GAME_TILE) {
+        cpuNoliVoidRush(cpu, target);
+        return;
+      }
+    } else if (isCat) {
+      // Draw: use whenever available
+      cpuCatDraw(cpu);
+      return;
     } else {
       cpu.cdE = fighter.abilities[1].cooldown;
       cpu.supportBuff = fighter.abilities[1].duration;
       cpu.effects.push({ type: 'support', timer: 1.5 });
+      // Slow nearby enemies
+      const abil = fighter.abilities[1];
+      const slowRange = (abil.slowRange || 8) * GAME_TILE;
+      const slowDur = abil.slowDuration || 7;
+      for (const target of gamePlayers) {
+        if (target.id === cpu.id || !target.alive || (target.isSummon && target.summonOwner === cpu.id)) continue;
+        const sdx = target.x - cpu.x, sdy = target.y - cpu.y;
+        if (Math.sqrt(sdx * sdx + sdy * sdy) < slowRange) {
+          target.buffSlowed = slowDur;
+        }
+      }
       return;
     }
   }
@@ -1556,6 +1886,18 @@ function cpuAttack(cpu, params) {
         cpu.effects.push({ type: 'deer-seer', timer: fighter.abilities[2].duration || 5 });
         return;
       }
+    } else if (isNoli) {
+      // Void Star: aimed area attack
+      if (!cpu.noliVoidRushActive && !cpu.noliVoidStarAiming && dist < 8 * GAME_TILE) {
+        cpuNoliVoidStar(cpu, target);
+        return;
+      }
+    } else if (isCat) {
+      // Attack buff when close to enemy
+      if (cpu.catAttackBuff <= 0 && dist < 3 * GAME_TILE) {
+        cpuCatAttack(cpu);
+        return;
+      }
     } else {
       if (dist < fighter.abilities[2].range * GAME_TILE) {
         cpuPowerSwing(cpu, target, aimNx, aimNy);
@@ -1599,7 +1941,7 @@ function cpuAttack(cpu, params) {
           fighter: fighter, alive: true,
           cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
           totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
-          supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+          supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
           noDamageTimer: 0, healTickTimer: 0, isHealing: false,
           specialJumping: false, specialAiming: false,
           specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
@@ -1612,6 +1954,10 @@ function cpuAttack(cpu, params) {
           gearUpTimer: 0, wicketIds: [], driveReflectTimer: 0,
           deerFearTimer: 0, deerFearTargetX: 0, deerFearTargetY: 0,
           deerSeerTimer: 0, deerRobotId: null, iglooX: 0, iglooY: 0, iglooTimer: 0,
+          noliVoidRushActive: false, noliVoidRushVx: 0, noliVoidRushVy: 0, noliVoidRushTimer: 0,
+          noliVoidRushChain: 0, noliVoidRushChainTimer: 0, noliVoidRushLastHitId: null,
+          noliVoidStarAiming: false, noliVoidStarAimX: 0, noliVoidStarAimY: 0, noliVoidStarTimer: 0,
+          noliObservantUses: 0, noliCloneId: null,
           isSummon: true, summonOwner: cpu.id, summonType: pick,
           summonSpeed: compDef.speed, summonDamage: compDef.damage,
           summonStunDur: compDef.stunDuration, summonAttackCD: compDef.attackCooldown,
@@ -1644,6 +1990,18 @@ function cpuAttack(cpu, params) {
       // Deer T: Deer's Spear — antler stab + stun
       if (cpu.deerSeerTimer <= 0 && dist < (fighter.abilities[3].range || 1.2) * GAME_TILE) {
         cpuDeerSpear(cpu, target, aimNx, aimNy);
+        return;
+      }
+    } else if (isNoli) {
+      // Observant: teleport when low HP
+      if (cpu.noliObservantUses < (fighter.abilities[3].maxUses || 3) && cpu.hp < cpu.maxHp * 0.3) {
+        cpuNoliObservant(cpu);
+        return;
+      }
+    } else if (isCat) {
+      // Steal: copy opponent's Move 3
+      if (dist < 6 * GAME_TILE) {
+        cpuCatSteal(cpu, target);
         return;
       }
     } else {
@@ -1687,6 +2045,16 @@ function cpuAttack(cpu, params) {
     } else if (isDeer) {
       if (cpu.deerSeerTimer <= 0) {
         cpuDeerEngineer(cpu);
+      }
+    } else if (isNoli) {
+      // Tendril Stab melee
+      if (!cpu.noliVoidRushActive && dist < (fighter.abilities[0].range || 1.5) * GAME_TILE) {
+        cpuNoliTendrilStab(cpu, target, aimNx, aimNy);
+      }
+    } else if (isCat) {
+      // Cat Scratch melee
+      if (dist < (fighter.abilities[0].range || 0.9) * GAME_TILE) {
+        cpuCatScratch(cpu, target, aimNx, aimNy);
       }
     } else {
       if (dist < fighter.abilities[0].range * GAME_TILE) {
@@ -2004,7 +2372,7 @@ function cpuUseSpecial1x(cpu) {
       fighter: fighter, alive: true,
       cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
       totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
-      supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+      supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
       noDamageTimer: 0, healTickTimer: 0, isHealing: false,
       specialJumping: false, specialAiming: false,
       specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
@@ -2109,7 +2477,7 @@ function cpuCricketWicket(cpu, target) {
       fighter: fighter, alive: true,
       cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
       totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
-      supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+      supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
       noDamageTimer: 0, healTickTimer: 0, isHealing: false,
       specialJumping: false, specialAiming: false,
       specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
@@ -2210,7 +2578,7 @@ function cpuDeerEngineer(cpu) {
     fighter: fighter, alive: true,
     cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
     totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
-    supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+    supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
     noDamageTimer: 0, healTickTimer: 0, isHealing: false,
     specialJumping: false, specialAiming: false,
     specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
@@ -2244,6 +2612,320 @@ function cpuUseSpecialDeer(cpu, target) {
   cpu.effects.push({ type: 'igloo', timer: (abil.duration || 5) + 1 });
 }
 
+// ── Noli CPU helper functions ──
+function cpuNoliTendrilStab(cpu, target, aimNx, aimNy) {
+  const abil = cpu.fighter.abilities[0];
+  cpu.cdM1 = abil.cooldown;
+  let dmg = abil.damage;
+  if (cpu.supportBuff > 0) dmg *= 1.5;
+  if (cpu.intimidated > 0) dmg *= 0.5;
+  const range = (abil.range || 1.5) * GAME_TILE;
+  for (const t of gamePlayers) {
+    if (t.id === cpu.id || !t.alive) continue;
+    if (t.isSummon && t.summonOwner === cpu.id) continue;
+    const dx = t.x - cpu.x, dy = t.y - cpu.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist > range) continue;
+    const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+    if (dot < 0) continue;
+    dealDamage(cpu, t, dmg);
+  }
+  cpu.effects.push({ type: 'tendril-stab', timer: 0.25, aimNx, aimNy });
+}
+
+function cpuNoliVoidRush(cpu, target) {
+  const abil = cpu.fighter.abilities[1];
+  const dx = target.x - cpu.x, dy = target.y - cpu.y;
+  const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+  const chain = cpu.noliVoidRushChain;
+  const baseSpeed = (abil.dashSpeed || 10) * GAME_TILE / 10;
+  const dashSpeed = baseSpeed * (1 + chain * (abil.speedScalePerChain || 0.15));
+  cpu.noliVoidRushVx = (dx / dist) * dashSpeed;
+  cpu.noliVoidRushVy = (dy / dist) * dashSpeed;
+  cpu.noliVoidRushActive = true;
+  cpu.noliVoidRushTimer = Infinity; // infinite dash — ends on wall/sea or player hit
+  if (cpu.noliVoidRushChain === 0) cpu.cdE = abil.cooldown;
+  cpu.effects.push({ type: 'void-rush', timer: 0.5 });
+}
+
+function cpuNoliVoidStar(cpu, target) {
+  const abil = cpu.fighter.abilities[2];
+  cpu.cdR = abil.cooldown;
+  cpu.noliVoidStarAiming = true;
+  cpu.noliVoidStarAimX = target.x;
+  cpu.noliVoidStarAimY = target.y;
+  cpu.noliVoidStarTimer = abil.aimTime || 1.5;
+  cpu.effects.push({ type: 'void-star-aim', timer: (abil.aimTime || 1.5) + 0.5 });
+}
+
+function cpuNoliObservant(cpu) {
+  const abil = cpu.fighter.abilities[3];
+  cpu.cdT = abil.cooldown;
+  cpu.noliObservantUses++;
+  cpu.stunned = 0;
+  const mapW = gameMap.cols * GAME_TILE, mapH = gameMap.rows * GAME_TILE;
+  let newX = mapW - cpu.x, newY = mapH - cpu.y;
+  const pr = GAME_TILE * PLAYER_RADIUS_RATIO;
+  newX = Math.max(pr, Math.min(mapW - pr, newX));
+  newY = Math.max(pr, Math.min(mapH - pr, newY));
+  let foundValid = false;
+  for (let attempts = 0; attempts < 20; attempts++) {
+    const tr = Math.floor(newY / GAME_TILE), tc = Math.floor(newX / GAME_TILE);
+    const tile = (tr >= 0 && tr < gameMap.rows && tc >= 0 && tc < gameMap.cols) ? gameMap.tiles[tr][tc] : -1;
+    if (tile === TILE.GROUND || tile === TILE.GRASS) { foundValid = true; break; }
+    newX += (Math.random() - 0.5) * GAME_TILE * 2;
+    newY += (Math.random() - 0.5) * GAME_TILE * 2;
+    newX = Math.max(pr, Math.min(mapW - pr, newX));
+    newY = Math.max(pr, Math.min(mapH - pr, newY));
+  }
+  if (!foundValid) {
+    newX = (gameMap.cols / 2 + 0.5) * GAME_TILE;
+    newY = (gameMap.rows / 2 + 0.5) * GAME_TILE;
+  }
+  cpu.x = newX; cpu.y = newY;
+  cpu.effects.push({ type: 'observant-tp', timer: 1.0 });
+}
+
+function cpuUseSpecialNoli(cpu) {
+  const fighter = cpu.fighter;
+  cpu.specialUsed = true;
+  // Remove existing clone
+  if (cpu.noliCloneId) {
+    const oldIdx = gamePlayers.findIndex(x => x.id === cpu.noliCloneId);
+    if (oldIdx >= 0) { gamePlayers[oldIdx].alive = false; gamePlayers.splice(oldIdx, 1); }
+    cpu.noliCloneId = null;
+  }
+  // Find target to clone
+  let closestDist = Infinity, closestTarget = null;
+  const candidates = gamePlayers.filter(t => t.id !== cpu.id && t.alive && !t.isSummon);
+  if (gameMode === 'training' && candidates.length > 0) {
+    closestTarget = candidates[Math.floor(Math.random() * candidates.length)];
+  } else {
+    for (const t of candidates) {
+      const d = Math.sqrt((t.x - cpu.x) ** 2 + (t.y - cpu.y) ** 2);
+      if (d < closestDist) { closestDist = d; closestTarget = t; }
+    }
+  }
+  if (!closestTarget) return;
+  const clonedFighter = closestTarget.fighter;
+  const cloneId = 'noli-clone-' + cpu.id + '-' + Date.now();
+  let cloneColor = '#a020f0';
+  if (clonedFighter.id === 'onexonexonex') cloneColor = '#50a070';
+  else if (clonedFighter.id === 'noli') cloneColor = '#ffffff';
+  const clone = createPlayerState(
+    { id: cloneId, name: closestTarget.name, color: cloneColor, fighterId: clonedFighter.id },
+    { r: Math.floor(cpu.y / GAME_TILE), c: Math.floor(cpu.x / GAME_TILE) },
+    clonedFighter
+  );
+  clone.x = cpu.x + (Math.random() - 0.5) * GAME_TILE * 2;
+  clone.y = cpu.y + (Math.random() - 0.5) * GAME_TILE * 2;
+  clone.isSummon = true;
+  clone.summonOwner = cpu.id;
+  clone.summonType = 'noli-clone';
+  clone.isCPU = true;
+  clone.noCloneHeal = true;
+  clone.difficulty = 'hard';
+  clone.aiState = {
+    moveTarget: null, attackTarget: null, thinkTimer: 0, abilityTimer: 0,
+    lastSeenPositions: {}, strafeDir: Math.random() < 0.5 ? 1 : -1, retreating: false,
+  };
+  clone.hp = closestTarget.maxHp;
+  clone.maxHp = closestTarget.maxHp;
+  gamePlayers.push(clone);
+  cpu.noliCloneId = cloneId;
+  cpu.effects.push({ type: 'hallucination', timer: 2.0 });
+}
+
+// ── Exploding Cat CPU AI ──
+function cpuCatScratch(cpu, target, aimNx, aimNy) {
+  const abil = cpu.fighter.abilities[0];
+  cpu.cdM1 = abil.cooldown;
+  let dmg = abil.damage;
+  if (cpu.catAttackBuff > 0) dmg = cpu.fighter.abilities[2].buffDamage || 200;
+  if (cpu.supportBuff > 0) dmg *= 1.5;
+  if (cpu.intimidated > 0) dmg *= 0.5;
+  dealDamage(target, dmg, cpu);
+  cpu.effects.push({ type: 'cat-scratch', timer: 0.3 });
+}
+
+function cpuCatDraw(cpu) {
+  const abil = cpu.fighter.abilities[1];
+  cpu.cdE = abil.cooldown;
+  const roll = Math.random();
+  if (roll < 0.25) {
+    cpu.catCards = (cpu.catCards || 0) + 1;
+    cpu.effects.push({ type: 'cat-draw-cat', timer: 1.0 });
+  } else if (roll < 0.5) {
+    // Shuffle: rotate positions
+    const alive = gamePlayers.filter(p => p.alive && !p.isSummon);
+    if (alive.length >= 2) {
+      const positions = alive.map(p => ({ x: p.x, y: p.y }));
+      const last = positions.pop();
+      positions.unshift(last);
+      alive.forEach((p, i) => { p.x = positions[i].x; p.y = positions[i].y; });
+    }
+    cpu.effects.push({ type: 'cat-draw-shuffle', timer: 1.0 });
+  } else if (roll < 0.75) {
+    // Nope: block one ability for all alive
+    const nopeAbilities = ['E', 'R', 'T'];
+    const blocked = nopeAbilities[Math.floor(Math.random() * nopeAbilities.length)];
+    const nopeDur = abil.nopeDuration || 5;
+    for (const p of gamePlayers) {
+      if (!p.alive || p.isSummon || p.id === cpu.id) continue;
+      p.catNopeTimer = nopeDur;
+      p.catNopeAbility = blocked;
+    }
+    cpu.effects.push({ type: 'cat-draw-nope', timer: 1.0 });
+  } else {
+    // Reveal: seer timer
+    cpu.catSeerTimer = abil.revealDuration || 5;
+    cpu.effects.push({ type: 'cat-draw-reveal', timer: 1.0 });
+  }
+}
+
+function cpuCatSteal(cpu, target) {
+  const abil = cpu.fighter.abilities[3];
+  cpu.cdT = abil.cooldown;
+  if (cpu.catStolenReady && cpu.catStolenAbil) {
+    // Fire saved ability (costs 1 cat card)
+    if ((cpu.catCards || 0) < 1) { cpu.cdT = 0; return; }
+    cpu.catCards--;
+    // Fire saved ability
+    const stolenFighter = FIGHTERS[cpu.catStolenAbil.fighterId];
+    if (stolenFighter) {
+      const stolenAbil = stolenFighter.abilities[cpu.catStolenAbil.abilIndex];
+      if (stolenAbil) {
+        if (stolenAbil.type === 'buff') {
+          cpu.supportBuff = stolenAbil.duration || 7;
+          if (stolenAbil.slowRange) {
+            const slowRange = (stolenAbil.slowRange || 8) * GAME_TILE;
+            const slowDur = stolenAbil.slowDuration || 7;
+            for (const t of gamePlayers) {
+              if (t.id === cpu.id || !t.alive || (t.isSummon && t.summonOwner === cpu.id)) continue;
+              const sdx = t.x - cpu.x, sdy = t.y - cpu.y;
+              if (Math.sqrt(sdx * sdx + sdy * sdy) < slowRange) t.buffSlowed = slowDur;
+            }
+          }
+        } else if (stolenAbil.type === 'debuff') {
+          const sightRange = (stolenAbil.range || 10) * GAME_TILE;
+          for (const t of gamePlayers) {
+            if (t.id === cpu.id || !t.alive || (t.isSummon && t.summonOwner === cpu.id)) continue;
+            const sdx = t.x - cpu.x, sdy = t.y - cpu.y;
+            if (Math.sqrt(sdx * sdx + sdy * sdy) < sightRange) {
+              t.intimidated = stolenAbil.duration || 10;
+              t.intimidatedBy = cpu.id;
+            }
+          }
+        } else if (stolenAbil.type === 'self') {
+          cpu.supportBuff = stolenAbil.duration || 5;
+        } else if (stolenAbil.type === 'summon' && stolenAbil.companions && !cpu.summonId) {
+          const companionKeys = Object.keys(stolenAbil.companions);
+          const pick = companionKeys[Math.floor(Math.random() * companionKeys.length)];
+          const compDef = stolenAbil.companions[pick];
+          const summonId = 'summon-' + cpu.id + '-' + Date.now();
+          const summon = {
+            id: summonId, name: compDef.name,
+            color: pick === 'fleshbed' ? '#8b4513' : pick === 'macrocosms' ? '#4a0080' : '#d4af37',
+            x: cpu.x + (Math.random() - 0.5) * GAME_TILE * 2,
+            y: cpu.y + (Math.random() - 0.5) * GAME_TILE * 2,
+            hp: compDef.hp, maxHp: compDef.hp,
+            fighter: cpu.fighter, alive: true,
+            cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
+            totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+            supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+            noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+            specialJumping: false, specialAiming: false,
+            specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+            effects: [],
+            blindBuff: null, blindTimer: 0, chipChangeDmg: -1, chipChangeTimer: 0,
+            chairCharges: 0, isCraftingChair: false, craftTimer: 0,
+            isEatingChair: false, eatTimer: 0, eatHealPool: 0,
+            summonId: null, boiledOneActive: false, boiledOneTimer: 0,
+            poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
+            gearUpTimer: 0, wicketIds: [], driveReflectTimer: 0,
+            deerFearTimer: 0, deerFearTargetX: 0, deerFearTargetY: 0,
+            deerSeerTimer: 0, deerRobotId: null, iglooX: 0, iglooY: 0, iglooTimer: 0,
+            isSummon: true, summonOwner: cpu.id, summonType: pick,
+            summonSpeed: compDef.speed, summonDamage: compDef.damage,
+            summonStunDur: compDef.stunDuration, summonAttackCD: compDef.attackCooldown,
+            summonAttackTimer: 0,
+          };
+          if (pick === 'obelisk') { summon.x = cpu.x; summon.y = cpu.y; }
+          gamePlayers.push(summon);
+          cpu.summonId = summonId;
+        } else {
+          const dx = target.x - cpu.x, dy = target.y - cpu.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          if (dist < (stolenAbil.range || 2) * GAME_TILE) {
+            let dmg = stolenAbil.damage || 50;
+            if (cpu.supportBuff > 0) dmg *= 1.5;
+            if (cpu.intimidated > 0) dmg *= 0.5;
+            dealDamage(cpu, target, dmg);
+          }
+        }
+      }
+    }
+    cpu.catStolenAbil = null;
+    cpu.catStolenReady = false;
+    cpu.effects.push({ type: 'cat-steal-fire', timer: 0.5 });
+  } else {
+    // Copy a random non-M1 ability from the target (costs 1 cat card, skip cats, Filbus only Oddity Overthrow)
+    if ((cpu.catCards || 0) < 1) { cpu.cdT = 0; return; }
+    if (target.fighter && target.fighter.id === 'explodingcat') return;
+    cpu.catCards--;
+    const fid = target.fighter.id;
+    const abilIdx = (fid === 'filbus') ? 3 : [1, 2, 3][Math.floor(Math.random() * 3)];
+    cpu.catStolenAbil = { fighterId: fid, abilIndex: abilIdx };
+    cpu.catStolenReady = true;
+    cpu.effects.push({ type: 'cat-steal-copy', timer: 0.5 });
+  }
+}
+
+function cpuCatAttack(cpu) {
+  const abil = cpu.fighter.abilities[2];
+  cpu.cdR = abil.cooldown;
+  cpu.catAttackBuff = abil.buffDuration || 5;
+  cpu.effects.push({ type: 'cat-attack-buff', timer: 1.0 });
+}
+
+function cpuUseSpecialCat(cpu) {
+  const fighter = cpu.fighter;
+  cpu.specialUsed = true;
+  const abil = fighter.abilities[4];
+  const count = abil.kittenCount || 4;
+  const kittenHp = abil.kittenHp || 400;
+  const radius = GAME_TILE * PLAYER_RADIUS_RATIO;
+  for (let i = 0; i < count; i++) {
+    const kittenId = 'kitten-' + cpu.id + '-' + Date.now() + '-' + i;
+    const angle = (i / count) * Math.PI * 2;
+    const spawnDist = GAME_TILE * 2;
+    const kitten = createPlayerState(
+      { id: kittenId, name: 'Kitten', color: '#111', fighterId: fighter.id },
+      { r: Math.floor(cpu.y / GAME_TILE), c: Math.floor(cpu.x / GAME_TILE) },
+      fighter
+    );
+    kitten.x = cpu.x + Math.cos(angle) * spawnDist;
+    kitten.y = cpu.y + Math.sin(angle) * spawnDist;
+    // Nudge out of obstacles
+    if (!canMoveTo(kitten.x, kitten.y, radius)) {
+      kitten.x = cpu.x;
+      kitten.y = cpu.y;
+    }
+    kitten.hp = kittenHp;
+    kitten.maxHp = kittenHp;
+    kitten.isSummon = true;
+    kitten.summonOwner = cpu.id;
+    kitten.summonType = 'exploding-kitten';
+    kitten.summonSpeed = abil.kittenSpeed || 2.5;
+    kitten.summonDamage = abil.damage || 1200;
+    kitten.explodeRadius = abil.explodeRadius || 1.5;
+    gamePlayers.push(kitten);
+    if (!cpu.catKittenIds) cpu.catKittenIds = [];
+    cpu.catKittenIds.push(kittenId);
+  }
+  cpu.effects.push({ type: 'exploding-kitten-spawn', timer: 1.5 });
+}
+
 // ═══════════════════════════════════════════════════════════════
 // ABILITIES
 // ═══════════════════════════════════════════════════════════════
@@ -2258,6 +2940,8 @@ function useAbility(key) {
   const is1x = fighter.id === 'onexonexonex';
   const isCricket = fighter.id === 'cricket';
   const isDeer = fighter.id === 'deer';
+  const isNoli = fighter.id === 'noli';
+  const isCat = fighter.id === 'explodingcat';
 
   // Filbus: channeling interrupts
   if (isFilbus && (key !== 'E' && key !== 'R')) {
@@ -2402,7 +3086,7 @@ function useAbility(key) {
         fighter: fighter, alive: true,
         cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
         totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
-        supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+        supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
         noDamageTimer: 0, healTickTimer: 0, isHealing: false,
         specialJumping: false, specialAiming: false,
         specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
@@ -2423,6 +3107,53 @@ function useAbility(key) {
       lp.deerRobotId = robotId;
       lp.deerBuildSlowTimer = 1.0; // 1 second build slowness
       lp.effects.push({ type: 'summon', timer: 1.5 });
+    } else if (isNoli) {
+      // Noli M1: Tendril Stab — melee
+      if (lp.noliVoidRushActive || lp.noliVoidStarAiming) return;
+      const range = (abil.range || 1.5) * GAME_TILE;
+      let baseDmg = abil.damage;
+      if (lp.supportBuff > 0) baseDmg *= 1.5;
+      if (lp.intimidated > 0) baseDmg *= 0.5;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > range) continue;
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < 0) continue;
+        dealDamage(lp, target, baseDmg);
+      }
+      lp.effects.push({ type: 'tendril-stab', timer: 0.25, aimNx, aimNy });
+    } else if (isCat) {
+      // Exploding Cat M1: Scratch — short melee
+      const range = (abil.range || 0.9) * GAME_TILE;
+      let baseDmg = (lp.catAttackBuff > 0) ? (fighter.abilities[2].buffDamage || 200) : abil.damage;
+      if (lp.supportBuff > 0) baseDmg *= 1.5;
+      if (lp.intimidated > 0) baseDmg *= 0.5;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      const aimX = mouseX + camX; const aimY = mouseY + camY;
+      const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+      const aimDist = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+      const aimNx = aimDx / aimDist; const aimNy = aimDy / aimDist;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive) continue;
+        if (target.isSummon && target.summonOwner === lp.id) continue;
+        const dx = target.x - lp.x; const dy = target.y - lp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist > range) continue;
+        const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+        if (dot < 0) continue;
+        dealDamage(lp, target, baseDmg);
+      }
+      lp.effects.push({ type: 'cat-scratch', timer: 0.2, aimNx, aimNy });
     } else {
       // Fighter: Sword (original M1)
       const range = abil.range * GAME_TILE;
@@ -2569,10 +3300,102 @@ function useAbility(key) {
       lp.deerFearTargetY = closestP ? closestP.y : lp.y;
       lp.effects.push({ type: 'deer-fear', timer: abil.duration || 5 });
       combatLog.push({ text: '🦌 Fear! Run away faster!', timer: 3, color: '#8fbc8f' });
+    } else if (isNoli) {
+      // Noli E: Void Rush — auto-aim toward nearest enemy player
+      if (lp.noliVoidRushActive || lp.noliVoidStarAiming) return;
+      if (lp.stunned > 0) return;
+      // Find nearest alive enemy
+      let nearDist = Infinity, nearTarget = null;
+      for (const t of gamePlayers) {
+        if (t.id === lp.id || !t.alive) continue;
+        if (t.isSummon && t.summonOwner === lp.id) continue;
+        const d = Math.sqrt((t.x - lp.x) ** 2 + (t.y - lp.y) ** 2);
+        if (d < nearDist) { nearDist = d; nearTarget = t; }
+      }
+      let dx, dy;
+      if (nearTarget) {
+        dx = nearTarget.x - lp.x; dy = nearTarget.y - lp.y;
+      } else {
+        // No enemies — fall back to mouse direction
+        const cw = gameCanvas.width; const ch = gameCanvas.height;
+        const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+        dx = mouseX + camX - lp.x; dy = mouseY + camY - lp.y;
+      }
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const chain = lp.noliVoidRushChain;
+      const baseSpeed = (abil.dashSpeed || 10) * GAME_TILE / 10;
+      const dashSpeed = baseSpeed * (1 + chain * (abil.speedScalePerChain || 0.15));
+      lp.noliVoidRushVx = (dx / dist) * dashSpeed;
+      lp.noliVoidRushVy = (dy / dist) * dashSpeed;
+      lp.noliVoidRushActive = true;
+      lp.noliVoidRushTimer = Infinity; // infinite dash — ends on wall/sea or player hit
+      if (chain === 0) lp.cdE = abil.cooldown;
+      lp.effects.push({ type: 'void-rush', timer: 0.5 });
+      combatLog.push({ text: chain > 0 ? '🌀 Void Rush x' + (chain + 1) + '!' : '🌀 Void Rush!', timer: 2, color: '#a020f0' });
+    } else if (isCat) {
+      // Exploding Cat E: Draw — random card
+      if (lp.catNopeTimer > 0 && lp.catNopeAbility === 'E') {
+        combatLog.push({ text: '🚫 Noped! Can\'t use Draw!', timer: 2, color: '#e94560' });
+        lp.cdE = 0;
+        return;
+      }
+      const roll = Math.random();
+      if (roll < 0.25) {
+        // Cat card — save it
+        lp.catCards++;
+        combatLog.push({ text: '🐱 Drew a Cat! (' + lp.catCards + ' saved)', timer: 3, color: '#ff9900' });
+        showPopup('🐱 CAT! (' + lp.catCards + ')');
+        lp.effects.push({ type: 'cat-draw-cat', timer: 1.0 });
+      } else if (roll < 0.50) {
+        // Shuffle — everyone swaps positions
+        const alivePlayers = gamePlayers.filter(p => p.alive && !p.isSummon);
+        if (alivePlayers.length >= 2) {
+          const positions = alivePlayers.map(p => ({ x: p.x, y: p.y }));
+          for (let i = 0; i < alivePlayers.length; i++) {
+            const nextPos = positions[(i + 1) % positions.length];
+            alivePlayers[i].x = nextPos.x;
+            alivePlayers[i].y = nextPos.y;
+          }
+        }
+        combatLog.push({ text: '🔀 Shuffle! Everyone swapped!', timer: 3, color: '#ff9900' });
+        showPopup('🔀 SHUFFLE!');
+        lp.effects.push({ type: 'cat-draw-shuffle', timer: 1.5 });
+      } else if (roll < 0.75) {
+        // Nope — block a random ability for all players
+        const nopeKeys = ['E', 'R', 'T'];
+        const nopeKey = nopeKeys[Math.floor(Math.random() * nopeKeys.length)];
+        const nopeDur = abil.nopeDuration || 5;
+        for (const p of gamePlayers) {
+          if (!p.alive || p.isSummon || p.id === lp.id) continue;
+          p.catNopeTimer = nopeDur;
+          p.catNopeAbility = nopeKey;
+        }
+        const keyNames = { E: 'Move 1', R: 'Move 2', T: 'Move 3' };
+        combatLog.push({ text: '🚫 Nope! ' + keyNames[nopeKey] + ' blocked for ' + nopeDur + 's!', timer: 3, color: '#e94560' });
+        showPopup('🚫 NOPE! (' + keyNames[nopeKey] + ')');
+        lp.effects.push({ type: 'cat-draw-nope', timer: 1.5 });
+      } else {
+        // Reveal the Future — seer mode
+        const revealDur = abil.revealDuration || 5;
+        lp.catSeerTimer = revealDur;
+        lp.effects.push({ type: 'cat-draw-reveal', timer: revealDur });
+        combatLog.push({ text: '🔮 Reveal the Future! See all enemies!', timer: 3, color: '#dda0dd' });
+        showPopup('🔮 REVEAL!');
+      }
     } else {
-      // Fighter: Support buff
+      // Fighter: Buff — damage boost + slow nearby enemies
       lp.supportBuff = abil.duration;
       lp.effects.push({ type: 'support', timer: 1.5 });
+      // Slow nearby enemies
+      const slowRange = (abil.slowRange || 8) * GAME_TILE;
+      const slowDur = abil.slowDuration || 7;
+      for (const target of gamePlayers) {
+        if (target.id === lp.id || !target.alive || (target.isSummon && target.summonOwner === lp.id)) continue;
+        const sdx = target.x - lp.x, sdy = target.y - lp.y;
+        if (Math.sqrt(sdx * sdx + sdy * sdy) < slowRange) {
+          target.buffSlowed = slowDur;
+        }
+      }
       if (typeof socket !== 'undefined' && socket.emit) {
         socket.emit('player-buff', { type: 'support', duration: abil.duration });
       }
@@ -2697,6 +3520,29 @@ function useAbility(key) {
       lp.effects.push({ type: 'deer-seer', timer: abil.duration || 5 });
       combatLog.push({ text: '🦌 Seer! Dodging all attacks!', timer: 3, color: '#dda0dd' });
       showPopup('👁 SEER MODE!');
+    } else if (isNoli) {
+      // Noli R: Void Star — aim then throw area attack, self-stun after
+      if (lp.noliVoidRushActive || lp.noliVoidStarAiming) return;
+      const cw = gameCanvas.width; const ch = gameCanvas.height;
+      const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+      lp.noliVoidStarAiming = true;
+      lp.noliVoidStarAimX = mouseX + camX;
+      lp.noliVoidStarAimY = mouseY + camY;
+      lp.noliVoidStarTimer = abil.aimTime || 1.5;
+      lp.effects.push({ type: 'void-star-aim', timer: (abil.aimTime || 1.5) + 0.5 });
+      combatLog.push({ text: '⭐ Aiming Void Star...', timer: 2, color: '#a020f0' });
+    } else if (isCat) {
+      // Exploding Cat R: Attack buff — scratch does 200 for 5s
+      if (lp.catNopeTimer > 0 && lp.catNopeAbility === 'R') {
+        combatLog.push({ text: '🚫 Noped! Can\'t use Attack!', timer: 2, color: '#e94560' });
+        return;
+      }
+      lp.cdR = abil.cooldown;
+      const dur = abil.buffDuration || 5;
+      lp.catAttackBuff = dur;
+      lp.effects.push({ type: 'cat-attack-buff', timer: dur });
+      combatLog.push({ text: '😼 Attack! Scratch deals 200 for ' + dur + 's!', timer: 3, color: '#ff4444' });
+      showPopup('😼 ATTACK BUFF!');
     } else {
       // Fighter: Power Swing
       const range = abil.range * GAME_TILE;
@@ -2788,7 +3634,7 @@ function useAbility(key) {
           cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
           totalDamageTaken: 0,
           specialUnlocked: false, specialUsed: false,
-          supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+          supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
           noDamageTimer: 0, healTickTimer: 0, isHealing: false,
           specialJumping: false, specialAiming: false,
           specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
@@ -2861,7 +3707,7 @@ function useAbility(key) {
           fighter: fighter, alive: true,
           cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
           totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
-          supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+          supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
           noDamageTimer: 0, healTickTimer: 0, isHealing: false,
           specialJumping: false, specialAiming: false,
           specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
@@ -2913,6 +3759,208 @@ function useAbility(key) {
         }
       }
       lp.effects.push({ type: 'deer-spear', timer: 0.25, aimNx, aimNy });
+    } else if (isNoli) {
+      // Noli T: Observant — teleport to opposite side of map (max 3 uses)
+      if (lp.noliVoidRushActive || lp.noliVoidStarAiming) return;
+      if (lp.noliObservantUses >= (abil.maxUses || 3)) {
+        combatLog.push({ text: '❌ No Observant charges left!', timer: 2, color: '#666' });
+        lp.cdT = 0; // refund cooldown
+        return;
+      }
+      lp.noliObservantUses++;
+      lp.cdT = abil.cooldown;
+      // Clear any lingering stun from previous abilities
+      lp.stunned = 0;
+      // Teleport to opposite side
+      const mapW = gameMap.cols * GAME_TILE, mapH = gameMap.rows * GAME_TILE;
+      let newX = mapW - lp.x, newY = mapH - lp.y;
+      // Clamp to valid position
+      const pr = GAME_TILE * PLAYER_RADIUS_RATIO;
+      newX = Math.max(pr, Math.min(mapW - pr, newX));
+      newY = Math.max(pr, Math.min(mapH - pr, newY));
+      // Find nearest valid tile
+      let foundValid = false;
+      for (let attempts = 0; attempts < 20; attempts++) {
+        const tr = Math.floor(newY / GAME_TILE), tc = Math.floor(newX / GAME_TILE);
+        const tile = (tr >= 0 && tr < gameMap.rows && tc >= 0 && tc < gameMap.cols) ? gameMap.tiles[tr][tc] : -1;
+        if (tile === TILE.GROUND || tile === TILE.GRASS) { foundValid = true; break; }
+        newX += (Math.random() - 0.5) * GAME_TILE * 2;
+        newY += (Math.random() - 0.5) * GAME_TILE * 2;
+        newX = Math.max(pr, Math.min(mapW - pr, newX));
+        newY = Math.max(pr, Math.min(mapH - pr, newY));
+      }
+      // Fallback to map center if no valid tile found
+      if (!foundValid) {
+        newX = (gameMap.cols / 2 + 0.5) * GAME_TILE;
+        newY = (gameMap.rows / 2 + 0.5) * GAME_TILE;
+      }
+      lp.x = newX; lp.y = newY;
+      lp.effects.push({ type: 'observant-tp', timer: 1.0 });
+      combatLog.push({ text: '👁 Observant! (' + ((abil.maxUses || 3) - lp.noliObservantUses) + ' left)', timer: 3, color: '#a020f0' });
+    } else if (isCat) {
+      // Exploding Cat T: Steal — copy opponent's Move 3
+      if (lp.catNopeTimer > 0 && lp.catNopeAbility === 'T') {
+        combatLog.push({ text: '🚫 Noped! Can\'t use Steal!', timer: 2, color: '#e94560' });
+        return;
+      }
+      lp.cdT = abil.cooldown;
+      if (lp.catStolenReady && lp.catStolenAbil) {
+        // Fire the stolen ability (costs 1 cat card)
+        if ((lp.catCards || 0) < 1) {
+          combatLog.push({ text: '🐱 Need a Cat card to fire stolen ability!', timer: 2, color: '#e94560' });
+          lp.cdT = 0;
+          return;
+        }
+        lp.catCards--;
+        const stolenFighter = getFighter(lp.catStolenAbil.fighterId);
+        const stolenAbil = stolenFighter.abilities[lp.catStolenAbil.abilIndex];
+        const range = (stolenAbil.range || 1.5) * GAME_TILE;
+        let baseDmg = stolenAbil.damage || 100;
+        if (lp.supportBuff > 0) baseDmg *= 1.5;
+        if (lp.intimidated > 0) baseDmg *= 0.5;
+        // Compute aim direction for visual effect
+        const fireCw = gameCanvas.width; const fireCh = gameCanvas.height;
+        const fireCamX = lp.x - fireCw / 2; const fireCamY = lp.y - fireCh / 2;
+        const fireAimX = mouseX + fireCamX; const fireAimY = mouseY + fireCamY;
+        const fireAimDx = fireAimX - lp.x; const fireAimDy = fireAimY - lp.y;
+        const fireAimDist = Math.sqrt(fireAimDx * fireAimDx + fireAimDy * fireAimDy) || 1;
+        const fireAimNx = fireAimDx / fireAimDist; const fireAimNy = fireAimDy / fireAimDist;
+        if (stolenAbil.type === 'buff') {
+          // Stolen buff: apply supportBuff to self + slow nearby enemies
+          lp.supportBuff = stolenAbil.duration || 7;
+          if (stolenAbil.slowRange) {
+            const slowRange = (stolenAbil.slowRange || 8) * GAME_TILE;
+            const slowDur = stolenAbil.slowDuration || 7;
+            for (const target of gamePlayers) {
+              if (target.id === lp.id || !target.alive || (target.isSummon && target.summonOwner === lp.id)) continue;
+              const sdx = target.x - lp.x, sdy = target.y - lp.y;
+              if (Math.sqrt(sdx * sdx + sdy * sdy) < slowRange) target.buffSlowed = slowDur;
+            }
+          }
+        } else if (stolenAbil.type === 'debuff') {
+          // Stolen debuff: intimidate nearby enemies
+          const sightRange = (stolenAbil.range || 10) * GAME_TILE;
+          for (const target of gamePlayers) {
+            if (target.id === lp.id || !target.alive || (target.isSummon && target.summonOwner === lp.id)) continue;
+            const sdx = target.x - lp.x, sdy = target.y - lp.y;
+            if (Math.sqrt(sdx * sdx + sdy * sdy) < sightRange) {
+              target.intimidated = stolenAbil.duration || 10;
+              target.intimidatedBy = lp.id;
+            }
+          }
+        } else if (stolenAbil.type === 'self') {
+          // Stolen self-buff: give cat a generic damage boost (supportBuff)
+          lp.supportBuff = stolenAbil.duration || 5;
+        } else if (stolenAbil.type === 'summon' && stolenAbil.companions) {
+          // Stolen summon: spawn a temporary companion (like Oddity Overthrow)
+          if (!lp.summonId) {
+            const companionKeys = Object.keys(stolenAbil.companions);
+            const pick = companionKeys[Math.floor(Math.random() * companionKeys.length)];
+            const compDef = stolenAbil.companions[pick];
+            const summonId = 'summon-' + lp.id + '-' + Date.now();
+            const summon = {
+              id: summonId, name: compDef.name,
+              color: pick === 'fleshbed' ? '#8b4513' : pick === 'macrocosms' ? '#4a0080' : '#d4af37',
+              x: lp.x + (Math.random() - 0.5) * GAME_TILE * 2,
+              y: lp.y + (Math.random() - 0.5) * GAME_TILE * 2,
+              hp: compDef.hp, maxHp: compDef.hp,
+              fighter: lp.fighter, alive: true,
+              cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
+              totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
+              supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+              noDamageTimer: 0, healTickTimer: 0, isHealing: false,
+              specialJumping: false, specialAiming: false,
+              specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
+              effects: [],
+              blindBuff: null, blindTimer: 0, chipChangeDmg: -1, chipChangeTimer: 0,
+              chairCharges: 0, isCraftingChair: false, craftTimer: 0,
+              isEatingChair: false, eatTimer: 0, eatHealPool: 0,
+              summonId: null, boiledOneActive: false, boiledOneTimer: 0,
+              poisonTimers: [], unstableEyeTimer: 0, zombieIds: [],
+              gearUpTimer: 0, wicketIds: [], driveReflectTimer: 0,
+              deerFearTimer: 0, deerFearTargetX: 0, deerFearTargetY: 0,
+              deerSeerTimer: 0, deerRobotId: null, iglooX: 0, iglooY: 0, iglooTimer: 0,
+              isSummon: true, summonOwner: lp.id, summonType: pick,
+              summonSpeed: compDef.speed, summonDamage: compDef.damage,
+              summonStunDur: compDef.stunDuration, summonAttackCD: compDef.attackCooldown,
+              summonAttackTimer: 0,
+            };
+            if (pick === 'obelisk') { summon.x = lp.x; summon.y = lp.y; }
+            gamePlayers.push(summon);
+            lp.summonId = summonId;
+          }
+        } else if (stolenAbil.type === 'melee') {
+          const cw = gameCanvas.width; const ch = gameCanvas.height;
+          const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+          const aimX = mouseX + camX; const aimY = mouseY + camY;
+          const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+          const aimDist2 = Math.sqrt(aimDx * aimDx + aimDy * aimDy) || 1;
+          const aimNx = aimDx / aimDist2; const aimNy = aimDy / aimDist2;
+          for (const target of gamePlayers) {
+            if (target.id === lp.id || !target.alive) continue;
+            if (target.isSummon && target.summonOwner === lp.id) continue;
+            const dx = target.x - lp.x; const dy = target.y - lp.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist > range) continue;
+            const dot = (dx * aimNx + dy * aimNy) / (dist || 1);
+            if (dot < 0) continue;
+            dealDamage(lp, target, baseDmg);
+          }
+        } else if (stolenAbil.projectileCount || stolenAbil.projectileSpeed) {
+          const cw = gameCanvas.width; const ch = gameCanvas.height;
+          const camX = lp.x - cw / 2; const camY = lp.y - ch / 2;
+          const aimX = mouseX + camX; const aimY = mouseY + camY;
+          const aimDx = aimX - lp.x; const aimDy = aimY - lp.y;
+          const baseAngle = Math.atan2(aimDy, aimDx);
+          const count = stolenAbil.projectileCount || 1;
+          const spread = stolenAbil.projectileSpread || 0.15;
+          for (let i = 0; i < count; i++) {
+            const angle = baseAngle + (i - (count - 1) / 2) * spread;
+            const spd = (stolenAbil.projectileSpeed || 8) * GAME_TILE / 10;
+            projectiles.push({ x: lp.x, y: lp.y, vx: Math.cos(angle) * spd, vy: Math.sin(angle) * spd, ownerId: lp.id, damage: baseDmg, timer: 0.8, type: 'chip' });
+          }
+        } else {
+          for (const target of gamePlayers) {
+            if (target.id === lp.id || !target.alive) continue;
+            if (target.isSummon && target.summonOwner === lp.id) continue;
+            const dx = target.x - lp.x; const dy = target.y - lp.y;
+            if (Math.sqrt(dx * dx + dy * dy) < GAME_TILE * 1.5) dealDamage(lp, target, baseDmg);
+          }
+        }
+        combatLog.push({ text: '🐱 Used stolen ' + stolenAbil.name + '!', timer: 3, color: '#ff9900' });
+        lp.effects.push({ type: 'cat-steal-fire', timer: 0.3, aimNx: fireAimNx, aimNy: fireAimNy, stolenType: stolenAbil.type });
+        lp.catStolenReady = false;
+        lp.catStolenAbil = null;
+      } else {
+        // Copy a random non-M1 ability from the closest opponent (costs 1 cat card)
+        if ((lp.catCards || 0) < 1) {
+          combatLog.push({ text: '🐱 Need a Cat card to steal!', timer: 2, color: '#e94560' });
+          lp.cdT = 0;
+          return;
+        }
+        lp.catCards--;
+        let closestDist = Infinity, closestTarget = null;
+        for (const t of gamePlayers) {
+          if (t.id === lp.id || !t.alive || t.isSummon) continue;
+          if (t.fighter && t.fighter.id === 'explodingcat') continue;
+          const d = Math.sqrt((t.x - lp.x) ** 2 + (t.y - lp.y) ** 2);
+          if (d < closestDist) { closestDist = d; closestTarget = t; }
+        }
+        if (closestTarget && closestTarget.fighter) {
+          const fid = closestTarget.fighter.id;
+          const abilIdx = (fid === 'filbus') ? 3 : [1, 2, 3][Math.floor(Math.random() * 3)];
+          lp.catStolenAbil = { fighterId: fid, abilIndex: abilIdx };
+          lp.catStolenReady = true;
+          const stolenName = closestTarget.fighter.abilities[abilIdx].name;
+          combatLog.push({ text: '🐱 Stole ' + stolenName + ' from ' + closestTarget.name + '!', timer: 3, color: '#ff9900' });
+          showPopup('🐱 STOLEN: ' + stolenName);
+          lp.effects.push({ type: 'cat-steal', timer: 1.0 });
+        } else {
+          combatLog.push({ text: '🐱 No one to steal from!', timer: 2, color: '#666' });
+          lp.catCards++; // refund card
+          lp.cdT = 0;
+        }
+      }
     } else {
       // Fighter: Intimidation
       lp.cdT = abil.cooldown;
@@ -3038,7 +4086,7 @@ function useAbility(key) {
           fighter: fighter, alive: true,
           cdM1: 0, cdE: 0, cdR: 0, cdT: 0,
           totalDamageTaken: 0, specialUnlocked: false, specialUsed: false,
-          supportBuff: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
+          supportBuff: 0, buffSlowed: 0, intimidated: 0, intimidatedBy: null, stunned: 0,
           noDamageTimer: 0, healTickTimer: 0, isHealing: false,
           specialJumping: false, specialAiming: false,
           specialAimX: 0, specialAimY: 0, specialAimTimer: 0,
@@ -3085,6 +4133,93 @@ function useAbility(key) {
       lp.specialAimTimer = aimTime;
       lp.effects.push({ type: 'igloo-aim', timer: aimTime + 2 });
       combatLog.push({ text: '🦌 IGLOO! Aim where to build!', timer: 3, color: '#87ceeb' });
+    } else if (isNoli) {
+      // Noli SPACE: Hallucinations — clone the closest fighter as CPU ally
+      lp.specialUsed = true;
+      // Remove existing clone
+      if (lp.noliCloneId) {
+        const oldIdx = gamePlayers.findIndex(x => x.id === lp.noliCloneId);
+        if (oldIdx >= 0) { gamePlayers[oldIdx].alive = false; gamePlayers.splice(oldIdx, 1); }
+        lp.noliCloneId = null;
+      }
+      // Find target to clone
+      let closestDist = Infinity, closestTarget = null;
+      const candidates = gamePlayers.filter(t => t.id !== lp.id && t.alive && !t.isSummon);
+      if (gameMode === 'training' && candidates.length > 0) {
+        closestTarget = candidates[Math.floor(Math.random() * candidates.length)];
+      } else {
+        for (const t of candidates) {
+          const d = Math.sqrt((t.x - lp.x) ** 2 + (t.y - lp.y) ** 2);
+          if (d < closestDist) { closestDist = d; closestTarget = t; }
+        }
+      }
+      if (!closestTarget) return;
+      // Clone the target
+      const clonedFighter = closestTarget.fighter;
+      const cloneId = 'noli-clone-' + lp.id + '-' + Date.now();
+      // Determine clone color: cloning 1x = half green/purple, cloning noli = white, else purple
+      let cloneColor = '#a020f0';
+      if (clonedFighter.id === 'onexonexonex') cloneColor = '#50a070';
+      else if (clonedFighter.id === 'noli') cloneColor = '#ffffff';
+      const clone = createPlayerState(
+        { id: cloneId, name: closestTarget.name, color: cloneColor, fighterId: clonedFighter.id },
+        { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+        clonedFighter
+      );
+      clone.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 2;
+      clone.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 2;
+      clone.isSummon = true;
+      clone.summonOwner = lp.id;
+      clone.summonType = 'noli-clone';
+      clone.isCPU = true;
+      clone.noCloneHeal = true; // clone cannot heal
+      clone.difficulty = 'hard';
+      clone.aiState = {
+        moveTarget: null, attackTarget: null, thinkTimer: 0, abilityTimer: 0,
+        lastSeenPositions: {}, strafeDir: Math.random() < 0.5 ? 1 : -1, retreating: false,
+      };
+      clone.hp = closestTarget.maxHp;
+      clone.maxHp = closestTarget.maxHp;
+      gamePlayers.push(clone);
+      lp.noliCloneId = cloneId;
+      lp.effects.push({ type: 'hallucination', timer: 2.0 });
+      combatLog.push({ text: '👻 Hallucination: ' + closestTarget.name + '!', timer: 3, color: '#a020f0' });
+    } else if (isCat) {
+      // Exploding Cat SPACE: Exploding Kitten — spawn 4 kittens
+      lp.specialUsed = true;
+      const sAbil = fighter.abilities[4];
+      const count = sAbil.kittenCount || 4;
+      lp.catKittenIds = [];
+      for (let i = 0; i < count; i++) {
+        const kitId = 'kitten-' + lp.id + '-' + i + '-' + Date.now();
+        const kitten = createPlayerState(
+          { id: kitId, name: 'Kitten', color: '#111', fighterId: 'explodingcat' },
+          { r: Math.floor(lp.y / GAME_TILE), c: Math.floor(lp.x / GAME_TILE) },
+          fighter
+        );
+        kitten.x = lp.x + (Math.random() - 0.5) * GAME_TILE * 3;
+        kitten.y = lp.y + (Math.random() - 0.5) * GAME_TILE * 3;
+        // Nudge out of obstacles
+        const kitRadius = GAME_TILE * PLAYER_RADIUS_RATIO;
+        if (!canMoveTo(kitten.x, kitten.y, kitRadius)) {
+          kitten.x = lp.x;
+          kitten.y = lp.y;
+        }
+        kitten.hp = sAbil.kittenHp || 400;
+        kitten.maxHp = sAbil.kittenHp || 400;
+        kitten.isSummon = true;
+        kitten.summonOwner = lp.id;
+        kitten.summonType = 'exploding-kitten';
+        kitten.summonSpeed = sAbil.kittenSpeed || 2.5;
+        kitten.summonDamage = sAbil.damage || 1200;
+        kitten.summonStunDur = 0;
+        kitten.summonAttackCD = 0;
+        kitten.summonAttackTimer = 0;
+        gamePlayers.push(kitten);
+        lp.catKittenIds.push(kitId);
+      }
+      lp.effects.push({ type: 'cat-explode-spawn', timer: 2.0 });
+      combatLog.push({ text: '💣 Exploding Kittens unleashed!', timer: 3, color: '#ff4444' });
     } else {
       // Fighter: Special jump
       lp.specialJumping = true;
@@ -3181,6 +4316,28 @@ function dealDamage(attacker, target, amount) {
       if (canMoveTo(tryX, tryY, r)) { target.x = tryX; target.y = tryY; break; }
     }
     target.effects.push({ type: 'deer-dodge', timer: 0.4 });
+    return; // damage fully dodged
+  }
+  // Cat Seer (Reveal the Future): dodge by jumping, same as deer
+  if (target.catSeerTimer > 0 && target.fighter && target.fighter.id === 'explodingcat') {
+    const r = GAME_TILE * PLAYER_RADIUS_RATIO;
+    let jx = 0, jy = 0;
+    if (attacker && attacker.alive) {
+      const adx = target.x - attacker.x; const ady = target.y - attacker.y;
+      const ad = Math.sqrt(adx * adx + ady * ady) || 1;
+      const side = Math.random() < 0.5 ? 1 : -1;
+      jx = (-ady / ad) * side; jy = (adx / ad) * side;
+    } else {
+      const angle = Math.random() * Math.PI * 2;
+      jx = Math.cos(angle); jy = Math.sin(angle);
+    }
+    const jumpDist = GAME_TILE * 2;
+    for (let s = 10; s >= 1; s--) {
+      const tryX = target.x + jx * jumpDist * (s / 10);
+      const tryY = target.y + jy * jumpDist * (s / 10);
+      if (canMoveTo(tryX, tryY, r)) { target.x = tryX; target.y = tryY; break; }
+    }
+    target.effects.push({ type: 'cat-dodge', timer: 0.4 });
     return; // damage fully dodged
   }
   // Blinds modifier (Poker)
@@ -3621,6 +4778,78 @@ function renderGame() {
         gameCtx.fillStyle = '#a0522d';
         gameCtx.fillRect(sx - 5, sy - stumpH / 2 - 2, 4, 2);
         gameCtx.fillRect(sx + 1, sy - stumpH / 2 - 2, 4, 2);
+      } else if (p.summonType === 'noli-clone') {
+        // Noli Hallucination clone: colored dot with ghostly purple overlay
+        gameCtx.fillStyle = isDying ? '#8b0000' : p.color;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Purple translucent overlay
+        gameCtx.fillStyle = 'rgba(160, 32, 240, 0.25)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Pulsing purple outline
+        const clonePulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.006);
+        gameCtx.strokeStyle = `rgba(160, 32, 240, ${0.5 + clonePulse * 0.4})`;
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 1, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Ghost icon — small "👻" indicator
+        gameCtx.fillStyle = 'rgba(160, 32, 240, 0.7)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy - radius - 5, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (p.summonType === 'exploding-kitten') {
+        // Exploding Kitten: black dot with cat ears and orange danger glow
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+        gameCtx.fill();
+        // Pulsing orange danger glow
+        const kittenPulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.008);
+        gameCtx.strokeStyle = `rgba(255, 120, 0, ${0.5 + kittenPulse * 0.5})`;
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 1, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // Cat ears (two triangles on top)
+        gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.7, sy - radius * 0.3);
+        gameCtx.lineTo(sx - radius * 0.3, sy - radius * 1.3);
+        gameCtx.lineTo(sx - radius * 0.0, sy - radius * 0.5);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.7, sy - radius * 0.3);
+        gameCtx.lineTo(sx + radius * 0.3, sy - radius * 1.3);
+        gameCtx.lineTo(sx + radius * 0.0, sy - radius * 0.5);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Inner ear pink
+        gameCtx.fillStyle = '#ff6600';
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - radius * 0.55, sy - radius * 0.4);
+        gameCtx.lineTo(sx - radius * 0.35, sy - radius * 1.0);
+        gameCtx.lineTo(sx - radius * 0.1, sy - radius * 0.55);
+        gameCtx.closePath();
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + radius * 0.55, sy - radius * 0.4);
+        gameCtx.lineTo(sx + radius * 0.35, sy - radius * 1.0);
+        gameCtx.lineTo(sx + radius * 0.1, sy - radius * 0.55);
+        gameCtx.closePath();
+        gameCtx.fill();
+        // Eyes — angry slits
+        gameCtx.fillStyle = '#ff4400';
+        gameCtx.beginPath();
+        gameCtx.ellipse(sx - 3, sy - 1, 2, 1, 0, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.beginPath();
+        gameCtx.ellipse(sx + 3, sy - 1, 2, 1, 0, 0, Math.PI * 2);
+        gameCtx.fill();
       }
     } else if (p.fighter && p.fighter.id === 'onexonexonex' && !p.isSummon) {
       // ── 1X1X1X1: Fully custom dot — dark base with neon green glitches + red eye ──
@@ -3693,6 +4922,71 @@ function renderGame() {
       // Zombie indicator if zombies active
       if (p.zombieIds && p.zombieIds.length > 0) {
         gameCtx.fillStyle = '#1a5c1a';
+        gameCtx.beginPath();
+        gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    } else if (p.fighter && p.fighter.id === 'noli' && !p.isSummon) {
+      // ── Noli: Purple version of 1X1X1X1 skin ──
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#111';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Glitchy neon purple edge fragments
+      gameCtx.strokeStyle = '#a020f0';
+      gameCtx.lineWidth = 2;
+      const nSegments = 8;
+      for (let i = 0; i < nSegments; i++) {
+        const a1 = (i / nSegments) * Math.PI * 2;
+        const a2 = ((i + 0.6) / nSegments) * Math.PI * 2;
+        const jitter = ((i * 7 + 3) % 5) * 0.5 - 1;
+        const rr = radius + jitter;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, rr, a1, a2);
+        gameCtx.stroke();
+      }
+      // Purple glitch streaks
+      gameCtx.strokeStyle = '#a020f0';
+      gameCtx.lineWidth = 1.2;
+      gameCtx.globalAlpha = 0.7;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.6, sy - radius * 0.3);
+      gameCtx.lineTo(sx - radius * 0.2, sy - radius * 0.1);
+      gameCtx.moveTo(sx + radius * 0.1, sy + radius * 0.2);
+      gameCtx.lineTo(sx + radius * 0.6, sy + radius * 0.1);
+      gameCtx.moveTo(sx - radius * 0.3, sy + radius * 0.4);
+      gameCtx.lineTo(sx + radius * 0.1, sy + radius * 0.55);
+      gameCtx.stroke();
+      gameCtx.globalAlpha = 1.0;
+      // Purple inner glow
+      gameCtx.fillStyle = 'rgba(160, 32, 240, 0.08)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius * 0.8, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Purple eye
+      gameCtx.fillStyle = 'rgba(160, 32, 240, 0.25)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy - radius * 0.15, 6, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#1a0030';
+      gameCtx.beginPath();
+      gameCtx.ellipse(sx, sy - radius * 0.15, 5, 3, 0, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#a020f0';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy - radius * 0.15, 2.5, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = '#000';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy - radius * 0.15, 1, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.fillStyle = 'rgba(200, 130, 255, 0.8)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx + 1, sy - radius * 0.15 - 1, 0.7, 0, Math.PI * 2);
+      gameCtx.fill();
+      // Clone indicator
+      if (p.noliCloneId) {
+        gameCtx.fillStyle = '#a020f0';
         gameCtx.beginPath();
         gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
         gameCtx.fill();
@@ -3863,6 +5157,87 @@ function renderGame() {
         gameCtx.beginPath();
         gameCtx.arc(sx + radius + 3, sy - radius - 3, 3, 0, Math.PI * 2);
         gameCtx.fill();
+      }
+    } else if (p.fighter && p.fighter.id === 'explodingcat') {
+      // Exploding Cat: cat ears on the dot + claw marks
+      const earH = radius * 1.1;
+      // Left ear
+      gameCtx.fillStyle = isDying ? '#8b0000' : '#222';
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.7, sy - radius * 0.2);
+      gameCtx.lineTo(sx - radius * 0.3, sy - radius * 0.2 - earH);
+      gameCtx.lineTo(sx, sy - radius * 0.4);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Right ear
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + radius * 0.7, sy - radius * 0.2);
+      gameCtx.lineTo(sx + radius * 0.3, sy - radius * 0.2 - earH);
+      gameCtx.lineTo(sx, sy - radius * 0.4);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Inner ear pink
+      gameCtx.fillStyle = '#ff69b4';
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx - radius * 0.55, sy - radius * 0.3);
+      gameCtx.lineTo(sx - radius * 0.35, sy - radius * 0.3 - earH * 0.6);
+      gameCtx.lineTo(sx - radius * 0.1, sy - radius * 0.45);
+      gameCtx.closePath();
+      gameCtx.fill();
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx + radius * 0.55, sy - radius * 0.3);
+      gameCtx.lineTo(sx + radius * 0.35, sy - radius * 0.3 - earH * 0.6);
+      gameCtx.lineTo(sx + radius * 0.1, sy - radius * 0.45);
+      gameCtx.closePath();
+      gameCtx.fill();
+      // Claw scratch marks (three diagonal lines)
+      gameCtx.strokeStyle = '#ff4444';
+      gameCtx.lineWidth = 1.5;
+      gameCtx.globalAlpha = 0.7;
+      for (let ci = -1; ci <= 1; ci++) {
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx + ci * 3 + radius * 0.6, sy - radius * 0.3);
+        gameCtx.lineTo(sx + ci * 3 + radius * 1.0, sy + radius * 0.3);
+        gameCtx.stroke();
+      }
+      gameCtx.globalAlpha = 1.0;
+      // Attack buff glow
+      if (p.catAttackBuff > 0) {
+        gameCtx.fillStyle = 'rgba(255, 68, 68, 0.25)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 5, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Seer glow (reveal the future)
+      if (p.catSeerTimer > 0) {
+        gameCtx.fillStyle = 'rgba(255, 215, 0, 0.2)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 4, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+      // Nope indicator
+      if (p.catNopeTimer > 0) {
+        gameCtx.strokeStyle = 'rgba(255, 0, 0, 0.6)';
+        gameCtx.lineWidth = 2;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 3, 0, Math.PI * 2);
+        gameCtx.stroke();
+        // X mark
+        gameCtx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+        gameCtx.lineWidth = 1.5;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx - 4, sy - radius - 6);
+        gameCtx.lineTo(sx + 4, sy - radius - 14);
+        gameCtx.moveTo(sx + 4, sy - radius - 6);
+        gameCtx.lineTo(sx - 4, sy - radius - 14);
+        gameCtx.stroke();
+      }
+      // Cat card count indicator
+      if (p.catCards > 0) {
+        gameCtx.fillStyle = '#ffcc00';
+        gameCtx.font = 'bold 8px monospace';
+        gameCtx.textAlign = 'center';
+        gameCtx.fillText(p.catCards + '', sx, sy + radius + 10);
       }
     } else {
       // Fighter: Sword indicator on the dot
@@ -4082,6 +5457,105 @@ function renderGame() {
       gameCtx.fillText('FEAR ' + Math.ceil(p.deerFearTimer) + 's', sx, sy - radius - 8);
     }
 
+    // Noli Tendril Stab effect (purple slash)
+    const tendrilFx = p.effects.find((fx) => fx.type === 'tendril-stab');
+    if (tendrilFx) {
+      const swLen = GAME_TILE * 1.2;
+      const aRad = Math.atan2(tendrilFx.aimNy, tendrilFx.aimNx);
+      gameCtx.strokeStyle = '#a020f0';
+      gameCtx.lineWidth = 3;
+      gameCtx.shadowColor = '#a020f0';
+      gameCtx.shadowBlur = 6;
+      gameCtx.beginPath();
+      gameCtx.moveTo(sx, sy);
+      gameCtx.lineTo(sx + Math.cos(aRad) * swLen, sy + Math.sin(aRad) * swLen);
+      gameCtx.stroke();
+      gameCtx.shadowBlur = 0;
+    }
+
+    // Noli Void Rush speed trail (purple afterimages behind player)
+    if (p._voidRushTrail && p._voidRushTrail.length > 0) {
+      for (const pt of p._voidRushTrail) {
+        const ptSx = pt.x - camX, ptSy = pt.y - camY;
+        const alpha = Math.max(0, pt.t / 0.3) * 0.4;
+        const trailR = radius * (0.5 + alpha);
+        gameCtx.fillStyle = 'rgba(160, 32, 240, ' + alpha.toFixed(2) + ')';
+        gameCtx.beginPath();
+        gameCtx.arc(ptSx, ptSy, trailR, 0, Math.PI * 2);
+        gameCtx.fill();
+      }
+    }
+
+    // Noli Void Rush aura — grows with chain count
+    if (p.noliVoidRushActive) {
+      const rushChain = p.noliVoidRushChain || 0;
+      const rushRadius = radius + 4 + rushChain * 2;
+      const rushAlpha = Math.min(0.5, 0.25 + rushChain * 0.05);
+      gameCtx.fillStyle = 'rgba(160, 32, 240, ' + rushAlpha + ')';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, rushRadius, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#a020f0';
+      gameCtx.lineWidth = 1.5 + rushChain * 0.5;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, rushRadius, 0, Math.PI * 2);
+      gameCtx.stroke();
+    }
+
+    // Noli Void Rush chain indicator
+    if (p.noliVoidRushChainTimer > 0 && p.noliVoidRushChain > 0) {
+      gameCtx.fillStyle = '#a020f0';
+      gameCtx.font = 'bold ' + Math.min(16, 10 + p.noliVoidRushChain) + 'px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('CHAIN ' + p.noliVoidRushChain + '!', sx, sy - radius - 12);
+    }
+
+    // Noli Void Star aiming indicator
+    if (p.noliVoidStarAiming) {
+      const aimSx = p.noliVoidStarAimX - camX, aimSy = p.noliVoidStarAimY - camY;
+      const starAbil = p.fighter && p.fighter.abilities[2];
+      const starR = ((starAbil ? starAbil.radius : 1.5) || 1.5) * GAME_TILE;
+      gameCtx.fillStyle = 'rgba(160, 32, 240, 0.15)';
+      gameCtx.beginPath();
+      gameCtx.arc(aimSx, aimSy, starR, 0, Math.PI * 2);
+      gameCtx.fill();
+      gameCtx.strokeStyle = '#a020f0';
+      gameCtx.lineWidth = 2;
+      gameCtx.setLineDash([4, 4]);
+      gameCtx.beginPath();
+      gameCtx.arc(aimSx, aimSy, starR, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.setLineDash([]);
+      // Star shape in center
+      gameCtx.fillStyle = '#a020f0';
+      gameCtx.font = 'bold 14px sans-serif';
+      gameCtx.textAlign = 'center';
+      gameCtx.fillText('⭐', aimSx, aimSy + 5);
+      gameCtx.fillStyle = '#a020f0';
+      gameCtx.font = 'bold 9px sans-serif';
+      gameCtx.fillText(Math.ceil(p.noliVoidStarTimer) + 's', aimSx, aimSy - starR - 6);
+    }
+
+    // Noli Observant teleport flash
+    if (p.effects.some((fx) => fx.type === 'observant-tp')) {
+      gameCtx.fillStyle = 'rgba(160, 32, 240, 0.5)';
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+      gameCtx.fill();
+    }
+
+    // Noli Hallucination summon flash
+    if (p.effects.some((fx) => fx.type === 'hallucination')) {
+      gameCtx.strokeStyle = '#a020f0';
+      gameCtx.lineWidth = 3;
+      gameCtx.shadowColor = '#a020f0';
+      gameCtx.shadowBlur = 10;
+      gameCtx.beginPath();
+      gameCtx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
+      gameCtx.stroke();
+      gameCtx.shadowBlur = 0;
+    }
+
     // Hit flash
     if (p.effects.some((fx) => fx.type === 'hit')) {
       gameCtx.fillStyle = 'rgba(255,0,0,0.3)';
@@ -4257,6 +5731,121 @@ function renderGame() {
       const aRad = Math.atan2(zombieSlashFx.aimNy, zombieSlashFx.aimNx);
       gameCtx.arc(sx, sy, swLen, aRad - 0.4, aRad + 0.4);
       gameCtx.stroke();
+    }
+
+    // Exploding Cat: Scratch claw marks effect (3 red claw arcs)
+    const clawFx = p.effects.find((fx) => fx.type === 'cat-scratch');
+    if (clawFx) {
+      const clawLen = GAME_TILE * 0.9;
+      const aRad = Math.atan2(clawFx.aimNy || 0, clawFx.aimNx || 1);
+      gameCtx.strokeStyle = '#ff4444';
+      gameCtx.lineWidth = 2.5;
+      gameCtx.lineCap = 'round';
+      for (let ci = -1; ci <= 1; ci++) {
+        const offset = ci * 0.25;
+        const startA = aRad - 0.35 + offset;
+        const endA = aRad + 0.35 + offset;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, clawLen + ci * 2, startA, endA);
+        gameCtx.stroke();
+      }
+      // Claw tip marks (sharp ends)
+      gameCtx.strokeStyle = '#ff6666';
+      gameCtx.lineWidth = 1.5;
+      for (let ci = -1; ci <= 1; ci++) {
+        const tipA = aRad + 0.35 + ci * 0.25;
+        const tipR = clawLen + ci * 2;
+        const tx = sx + Math.cos(tipA) * tipR;
+        const ty = sy + Math.sin(tipA) * tipR;
+        gameCtx.beginPath();
+        gameCtx.moveTo(tx, ty);
+        gameCtx.lineTo(tx + Math.cos(tipA) * 4, ty + Math.sin(tipA) * 4);
+        gameCtx.stroke();
+      }
+    }
+
+    // Cat Steal-Fire effect: orange slash/ring depending on stolen ability type
+    const stealFireFx = p.effects.find((fx) => fx.type === 'cat-steal-fire');
+    if (stealFireFx) {
+      const aRad = Math.atan2(stealFireFx.aimNy || 0, stealFireFx.aimNx || 1);
+      const sType = stealFireFx.stolenType;
+      if (sType === 'melee') {
+        // Orange directional arc
+        const swLen = GAME_TILE * 1.2;
+        gameCtx.strokeStyle = '#ff9900';
+        gameCtx.lineWidth = 4;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, swLen, aRad - 0.5, aRad + 0.5);
+        gameCtx.stroke();
+      } else if (sType === 'ranged' || sType === 'projectile') {
+        // Orange line in aim direction
+        const lineLen = GAME_TILE * 1.5;
+        gameCtx.strokeStyle = '#ff9900';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.moveTo(sx, sy);
+        gameCtx.lineTo(sx + Math.cos(aRad) * lineLen, sy + Math.sin(aRad) * lineLen);
+        gameCtx.stroke();
+      } else if (sType === 'buff' || sType === 'self') {
+        // Orange glow ring (self-buff)
+        gameCtx.strokeStyle = '#ff9900';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.fillStyle = 'rgba(255, 153, 0, 0.15)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 8, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (sType === 'debuff') {
+        // Purple pulse ring (debuff applied)
+        gameCtx.strokeStyle = '#9b59b6';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+        gameCtx.stroke();
+        gameCtx.fillStyle = 'rgba(155, 89, 182, 0.15)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 10, 0, Math.PI * 2);
+        gameCtx.fill();
+      } else if (sType === 'summon') {
+        // Gold summon flash
+        gameCtx.fillStyle = 'rgba(212, 175, 55, 0.25)';
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
+        gameCtx.fill();
+        gameCtx.strokeStyle = '#d4af37';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 12, 0, Math.PI * 2);
+        gameCtx.stroke();
+      } else {
+        // Default: orange ring
+        gameCtx.strokeStyle = '#ff9900';
+        gameCtx.lineWidth = 3;
+        gameCtx.beginPath();
+        gameCtx.arc(sx, sy, radius + 6, 0, Math.PI * 2);
+        gameCtx.stroke();
+      }
+    }
+
+    // Cat Draw card text (visible to all players via synced effects)
+    const drawCatFx = p.effects.find((fx) => fx.type === 'cat-draw-cat');
+    const drawShuffleFx = p.effects.find((fx) => fx.type === 'cat-draw-shuffle');
+    const drawNopeFx = p.effects.find((fx) => fx.type === 'cat-draw-nope');
+    const drawRevealFx = p.effects.find((fx) => fx.type === 'cat-draw-reveal');
+    if (drawCatFx || drawShuffleFx || drawNopeFx || drawRevealFx) {
+      gameCtx.font = 'bold 11px sans-serif';
+      gameCtx.textAlign = 'center';
+      let drawText, drawColor;
+      if (drawCatFx) { drawText = '🐱 CAT!'; drawColor = '#ff9900'; }
+      else if (drawShuffleFx) { drawText = '🔀 SHUFFLE!'; drawColor = '#ff9900'; }
+      else if (drawNopeFx) { drawText = '🚫 NOPE!'; drawColor = '#e94560'; }
+      else { drawText = '🔮 REVEAL!'; drawColor = '#dda0dd'; }
+      gameCtx.fillStyle = '#000';
+      gameCtx.fillText(drawText, sx + 1, sy - radius - 11);
+      gameCtx.fillStyle = drawColor;
+      gameCtx.fillText(drawText, sx, sy - radius - 12);
     }
 
     // Poison visual: green ring when poisoned
@@ -4617,9 +6206,9 @@ function drawEffectLog() {
   }
   if (lp.supportBuff > 0) {
     gameCtx.fillStyle = '#000';
-    gameCtx.fillText('💪 Support ' + Math.ceil(lp.supportBuff) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillText('💪 Buff ' + Math.ceil(lp.supportBuff) + 's', cw / 2 + 1, logY + 1);
     gameCtx.fillStyle = '#2ecc71';
-    gameCtx.fillText('💪 Support ' + Math.ceil(lp.supportBuff) + 's', cw / 2, logY);
+    gameCtx.fillText('💪 Buff ' + Math.ceil(lp.supportBuff) + 's', cw / 2, logY);
     logY += 20;
   }
   if (lp.intimidated > 0) {
@@ -4627,6 +6216,13 @@ function drawEffectLog() {
     gameCtx.fillText('😨 Intimidated ' + Math.ceil(lp.intimidated) + 's', cw / 2 + 1, logY + 1);
     gameCtx.fillStyle = '#9b59b6';
     gameCtx.fillText('😨 Intimidated ' + Math.ceil(lp.intimidated) + 's', cw / 2, logY);
+    logY += 20;
+  }
+  if (lp.buffSlowed > 0) {
+    gameCtx.fillStyle = '#000';
+    gameCtx.fillText('🐌 Slowed ' + Math.ceil(lp.buffSlowed) + 's', cw / 2 + 1, logY + 1);
+    gameCtx.fillStyle = '#e67e22';
+    gameCtx.fillText('🐌 Slowed ' + Math.ceil(lp.buffSlowed) + 's', cw / 2, logY);
     logY += 20;
   }
   // Filbus status
@@ -4731,7 +6327,7 @@ function updateHUD() {
       if (c.id === 'SPC') {
         ov.textContent = lp.specialUsed ? '✓' : '🔒';
       } else {
-        ov.textContent = Math.ceil(c.cd) + 's';
+        ov.textContent = (c.cd < 1 ? c.cd.toFixed(1) : Math.ceil(c.cd)) + 's';
       }
     } else {
       if (c.id === 'SPC' && lp.specialUnlocked && !lp.specialUsed) {
@@ -4915,7 +6511,9 @@ function buildGameStateSnapshot() {
     summonType: p.summonType || null,
     // buffs/debuffs
     supportBuff: p.supportBuff,
+    buffSlowed: p.buffSlowed || 0,
     intimidated: p.intimidated,
+    intimidatedBy: p.intimidatedBy || null,
     poisonTimers: p.poisonTimers || [],
     unstableEyeTimer: p.unstableEyeTimer || 0,
     boiledOneActive: p.boiledOneActive || false,
@@ -4927,6 +6525,7 @@ function buildGameStateSnapshot() {
     chairCharges: p.chairCharges || 0,
     isCraftingChair: p.isCraftingChair || false,
     isEatingChair: p.isEatingChair || false,
+    summonId: p.summonId || null,
     // Cricket
     gearUpTimer: p.gearUpTimer || 0,
     driveReflectTimer: p.driveReflectTimer || 0,
@@ -4941,8 +6540,29 @@ function buildGameStateSnapshot() {
     iglooX: p.iglooX || 0,
     iglooY: p.iglooY || 0,
     iglooTimer: p.iglooTimer || 0,
-    // visual effects (include aimNx/aimNy for directional rendering)
-    effects: (p.effects || []).map(fx => ({ type: fx.type, timer: fx.timer, aimNx: fx.aimNx, aimNy: fx.aimNy })),
+    // Noli
+    noliVoidRushActive: p.noliVoidRushActive || false,
+    noliVoidRushVx: p.noliVoidRushVx || 0,
+    noliVoidRushVy: p.noliVoidRushVy || 0,
+    noliVoidRushChain: p.noliVoidRushChain || 0,
+    noliVoidRushChainTimer: p.noliVoidRushChainTimer || 0,
+    noliVoidStarAiming: p.noliVoidStarAiming || false,
+    noliVoidStarAimX: p.noliVoidStarAimX || 0,
+    noliVoidStarAimY: p.noliVoidStarAimY || 0,
+    noliVoidStarTimer: p.noliVoidStarTimer || 0,
+    noliObservantUses: p.noliObservantUses || 0,
+    noliCloneId: p.noliCloneId || null,
+    // Exploding Cat
+    catCards: p.catCards || 0,
+    catStolenAbil: p.catStolenAbil || null,
+    catStolenReady: p.catStolenReady || false,
+    catAttackBuff: p.catAttackBuff || 0,
+    catSeerTimer: p.catSeerTimer || 0,
+    catNopeTimer: p.catNopeTimer || 0,
+    catNopeAbility: p.catNopeAbility || null,
+    catKittenIds: p.catKittenIds || [],
+    // visual effects (include aimNx/aimNy for directional rendering, stolenType for cat-steal-fire)
+    effects: (p.effects || []).map(fx => ({ type: fx.type, timer: fx.timer, aimNx: fx.aimNx, aimNy: fx.aimNy, stolenType: fx.stolenType })),
     // fighter id so client knows what it is
     fighterId: p.fighter ? p.fighter.id : null,
   }));
@@ -5002,7 +6622,9 @@ function onRemoteGameState(snapshot) {
     p.cdM1 = sp.cdM1; p.cdE = sp.cdE; p.cdR = sp.cdR; p.cdT = sp.cdT;
     p.isSummon = sp.isSummon; p.summonOwner = sp.summonOwner; p.summonType = sp.summonType;
     p.supportBuff = sp.supportBuff;
+    p.buffSlowed = sp.buffSlowed || 0;
     p.intimidated = sp.intimidated;
+    p.intimidatedBy = sp.intimidatedBy || null;
     p.poisonTimers = sp.poisonTimers || [];
     p.unstableEyeTimer = sp.unstableEyeTimer || 0;
     p.boiledOneActive = sp.boiledOneActive || false;
@@ -5013,6 +6635,7 @@ function onRemoteGameState(snapshot) {
     p.chairCharges = sp.chairCharges || 0;
     p.isCraftingChair = sp.isCraftingChair || false;
     p.isEatingChair = sp.isEatingChair || false;
+    p.summonId = sp.summonId || null;
     p.gearUpTimer = sp.gearUpTimer || 0;
     p.driveReflectTimer = sp.driveReflectTimer || 0;
     p.wicketIds = sp.wicketIds || [];
@@ -5026,6 +6649,27 @@ function onRemoteGameState(snapshot) {
     p.iglooX = sp.iglooX || 0;
     p.iglooY = sp.iglooY || 0;
     p.iglooTimer = sp.iglooTimer || 0;
+    // Noli
+    p.noliVoidRushActive = sp.noliVoidRushActive || false;
+    p.noliVoidRushVx = sp.noliVoidRushVx || 0;
+    p.noliVoidRushVy = sp.noliVoidRushVy || 0;
+    p.noliVoidRushChain = sp.noliVoidRushChain || 0;
+    p.noliVoidRushChainTimer = sp.noliVoidRushChainTimer || 0;
+    p.noliVoidStarAiming = sp.noliVoidStarAiming || false;
+    p.noliVoidStarAimX = sp.noliVoidStarAimX || 0;
+    p.noliVoidStarAimY = sp.noliVoidStarAimY || 0;
+    p.noliVoidStarTimer = sp.noliVoidStarTimer || 0;
+    p.noliObservantUses = sp.noliObservantUses || 0;
+    p.noliCloneId = sp.noliCloneId || null;
+    // Exploding Cat
+    p.catCards = sp.catCards || 0;
+    p.catStolenAbil = sp.catStolenAbil || null;
+    p.catStolenReady = sp.catStolenReady || false;
+    p.catAttackBuff = sp.catAttackBuff || 0;
+    p.catSeerTimer = sp.catSeerTimer || 0;
+    p.catNopeTimer = sp.catNopeTimer || 0;
+    p.catNopeAbility = sp.catNopeAbility || null;
+    p.catKittenIds = sp.catKittenIds || [];
     if (sp.effects) p.effects = sp.effects;
   }
 
@@ -5043,11 +6687,11 @@ function onRemoteGameState(snapshot) {
 // Host: receive input from a non-host client and store it
 function onRemoteInput(input) {
   if (!isHostAuthority) return;
-  const { playerId, mouseX: mx, mouseY: my, mouseDown: md, pendingAbilities: pa } = input;
-  if (!remoteInputs[playerId]) remoteInputs[playerId] = { mouseX: 0, mouseY: 0, mouseDown: false, pendingAbilities: [] };
+  const { playerId, aimWorldX: awx, aimWorldY: awy, mouseDown: md, pendingAbilities: pa } = input;
+  if (!remoteInputs[playerId]) remoteInputs[playerId] = { aimWorldX: 0, aimWorldY: 0, mouseDown: false, pendingAbilities: [] };
   const ri = remoteInputs[playerId];
-  ri.mouseX = mx || 0;
-  ri.mouseY = my || 0;
+  ri.aimWorldX = awx || 0;
+  ri.aimWorldY = awy || 0;
   ri.mouseDown = md || false;
   // Append pending abilities (don't overwrite, accumulate between frames)
   if (pa && pa.length) ri.pendingAbilities.push(...pa);
@@ -5140,12 +6784,11 @@ function applyRemoteAbility(p, abilKey, inp) {
   const savedMouseDown = mouseDown;
   localPlayer = p;
   localPlayerId = p.id;
-  // Transform the remote player's mouse coords to world coords
-  // inp.mouseX/Y are screen coords; we need to translate via their position as camera centre
+  // Convert world-space aim coords to screen-space for useAbility
   const cw = gameCanvas.width, ch = gameCanvas.height;
   const camX = p.x - cw / 2, camY = p.y - ch / 2;
-  mouseX = inp.mouseX;
-  mouseY = inp.mouseY;
+  mouseX = (inp.aimWorldX || 0) - camX;
+  mouseY = (inp.aimWorldY || 0) - camY;
   mouseDown = inp.mouseDown || false;
   try { useAbility(abilKey); } catch(e) { /* ignore errors from remote ability */ }
   localPlayer = savedLocal;

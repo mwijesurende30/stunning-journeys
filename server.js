@@ -14,7 +14,14 @@ const io = new Server(server, {
   pingInterval: 10000,
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), {
+  etag: false,
+  maxAge: 0,
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+  }
+}));
 
 // ── Lobby state ─────────────────────────────────────────────
 // lobbies Map:  code -> { host, mapIndex, players: Map<socketId, {name, color}> }

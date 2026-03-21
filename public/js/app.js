@@ -62,9 +62,7 @@ $('#btn-join').addEventListener('click', () => {
   flowTarget = 'join';
   showScreen('screen-name');
 });
-$('#btn-achievements').addEventListener('click', () => showScreen('screen-achievements'));
 $('#btn-fighters-back').addEventListener('click', () => showScreen('screen-name'));
-$('#btn-achievements-back').addEventListener('click', () => showScreen('screen-start'));
 
 // ── Screen: Name input ───────────────────────────────────────
 $('#btn-name-ok').addEventListener('click', submitName);
@@ -83,9 +81,18 @@ function submitName() {
 
   console.log('submitName:', flowTarget, playerName);
 
-  // Route through fighter selection before continuing
-  populateFighterScreen();
-  showScreen('screen-fighters');
+  if (flowTarget === 'host') {
+    // Multiplayer host: go to map select, then lobby (fighter select is in lobby)
+    buildMapGrid();
+    showScreen('screen-host-map');
+  } else if (flowTarget === 'join') {
+    // Multiplayer join: go to code entry, then lobby (fighter select is in lobby)
+    showScreen('screen-join');
+  } else {
+    // Singleplayer: show fighter select screen
+    populateFighterScreen();
+    showScreen('screen-fighters');
+  }
 }
 
 // ── Screen: Map select (host) ────────────────────────────────
@@ -156,6 +163,7 @@ function openLobby(code, mapIndex, players, hosting, availableColors) {
 
   refreshPlayerList(players);
   buildColorPicker(availableColors || []);
+  populateLobbyFighters();
   showScreen('screen-lobby');
 }
 
@@ -370,24 +378,54 @@ function enterGame(mapIndex, players, mode) {
 }
 
 // ── Fighter screen ───────────────────────────────────────────
-function drawFighterIcon(canvas, fighterId) {
-  const size = 48;
+function drawFighterIcon(canvas, fighterId, customSize) {
+  const size = customSize || 72;
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext('2d');
   const cx = size / 2, cy = size / 2, r = size * 0.38;
 
   if (fighterId === 'onexonexonex') {
-    // Dark base with green glitches + red eye
-    ctx.fillStyle = '#111';
-    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = '#00ff66'; ctx.lineWidth = 1.5;
-    for (let i = 0; i < 6; i++) {
-      const a1 = (i / 6) * Math.PI * 2, a2 = ((i + 0.5) / 6) * Math.PI * 2;
-      ctx.beginPath(); ctx.arc(cx, cy, r + ((i * 3) % 3 - 1), a1, a2); ctx.stroke();
-    }
-    ctx.fillStyle = '#ff2200'; ctx.beginPath(); ctx.arc(cx, cy - 2, 3, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(cx, cy - 2, 1.2, 0, Math.PI * 2); ctx.fill();
+    // Two crossed neon green swords
+    ctx.lineCap = 'round';
+    const sLen = r * 1.3;
+    // Sword 1 (top-left to bottom-right)
+    ctx.strokeStyle = '#00ff66'; ctx.lineWidth = 3; ctx.shadowColor = '#00ff66'; ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.moveTo(cx - sLen * 0.45, cy - sLen * 0.45);
+    ctx.lineTo(cx + sLen * 0.45, cy + sLen * 0.45);
+    ctx.stroke();
+    // Blade highlight
+    ctx.strokeStyle = '#88ffbb'; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(cx - sLen * 0.42, cy - sLen * 0.42);
+    ctx.lineTo(cx + sLen * 0.42, cy + sLen * 0.42);
+    ctx.stroke();
+    // Guard 1
+    ctx.strokeStyle = '#00ff66'; ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(cx - sLen * 0.15, cy + sLen * 0.05);
+    ctx.lineTo(cx + sLen * 0.05, cy - sLen * 0.15);
+    ctx.stroke();
+    // Sword 2 (top-right to bottom-left)
+    ctx.strokeStyle = '#00ff66'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cx + sLen * 0.45, cy - sLen * 0.45);
+    ctx.lineTo(cx - sLen * 0.45, cy + sLen * 0.45);
+    ctx.stroke();
+    // Blade highlight
+    ctx.strokeStyle = '#88ffbb'; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(cx + sLen * 0.42, cy - sLen * 0.42);
+    ctx.lineTo(cx - sLen * 0.42, cy + sLen * 0.42);
+    ctx.stroke();
+    // Guard 2
+    ctx.strokeStyle = '#00ff66'; ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(cx - sLen * 0.05, cy - sLen * 0.15);
+    ctx.lineTo(cx + sLen * 0.15, cy + sLen * 0.05);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
   } else if (fighterId === 'poker') {
     // Chip icon
     ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
@@ -465,6 +503,75 @@ function drawFighterIcon(canvas, fighterId) {
     ctx.fillStyle = '#8b6914'; ctx.beginPath(); ctx.arc(cx, cy + 8, 5, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(cx - 2, cy + 7, 1, 0, Math.PI * 2); ctx.fill();
     ctx.beginPath(); ctx.arc(cx + 2, cy + 7, 1, 0, Math.PI * 2); ctx.fill();
+  } else if (fighterId === 'noli') {
+    // 3 four-pointed stars, white filled, thin purple outline
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    function draw4Star(x, y, starR) {
+      ctx.beginPath();
+      for (let i = 0; i < 8; i++) {
+        const a = (i * Math.PI) / 4 - Math.PI / 2;
+        const sr = i % 2 === 0 ? starR : starR * 0.3;
+        if (i === 0) ctx.moveTo(x + Math.cos(a) * sr, y + Math.sin(a) * sr);
+        else ctx.lineTo(x + Math.cos(a) * sr, y + Math.sin(a) * sr);
+      }
+      ctx.closePath();
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+      ctx.strokeStyle = '#a020f0';
+      ctx.lineWidth = 1;
+      ctx.shadowColor = '#a020f0';
+      ctx.shadowBlur = 4;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+    draw4Star(cx - 7, cy - 5, 7);
+    draw4Star(cx + 8, cy - 2, 5);
+    draw4Star(cx + 1, cy + 8, 4);
+  } else if (fighterId === 'explodingcat') {
+    // Cat face icon — ears, eyes, whiskers
+    ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    // Cat head
+    ctx.fillStyle = '#222';
+    ctx.beginPath(); ctx.arc(cx, cy + 4, r * 0.55, 0, Math.PI * 2); ctx.fill();
+    // Left ear
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.45, cy + 2);
+    ctx.lineTo(cx - r * 0.25, cy - r * 0.6);
+    ctx.lineTo(cx - r * 0.05, cy);
+    ctx.closePath(); ctx.fill();
+    // Right ear
+    ctx.beginPath();
+    ctx.moveTo(cx + r * 0.45, cy + 2);
+    ctx.lineTo(cx + r * 0.25, cy - r * 0.6);
+    ctx.lineTo(cx + r * 0.05, cy);
+    ctx.closePath(); ctx.fill();
+    // Inner ears (orange)
+    ctx.fillStyle = '#ff6600';
+    ctx.beginPath();
+    ctx.moveTo(cx - r * 0.35, cy + 1);
+    ctx.lineTo(cx - r * 0.25, cy - r * 0.4);
+    ctx.lineTo(cx - r * 0.1, cy);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx + r * 0.35, cy + 1);
+    ctx.lineTo(cx + r * 0.25, cy - r * 0.4);
+    ctx.lineTo(cx + r * 0.1, cy);
+    ctx.closePath(); ctx.fill();
+    // Eyes (angry slits)
+    ctx.fillStyle = '#ff4400';
+    ctx.beginPath(); ctx.ellipse(cx - 5, cy + 2, 3, 1.5, -0.2, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx + 5, cy + 2, 3, 1.5, 0.2, 0, Math.PI * 2); ctx.fill();
+    // Nose
+    ctx.fillStyle = '#ff69b4';
+    ctx.beginPath(); ctx.arc(cx, cy + 6, 1.5, 0, Math.PI * 2); ctx.fill();
+    // Whiskers
+    ctx.strokeStyle = '#666'; ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.moveTo(cx - 5, cy + 6); ctx.lineTo(cx - r * 0.7, cy + 4);
+    ctx.moveTo(cx - 5, cy + 7); ctx.lineTo(cx - r * 0.7, cy + 8);
+    ctx.moveTo(cx + 5, cy + 6); ctx.lineTo(cx + r * 0.7, cy + 4);
+    ctx.moveTo(cx + 5, cy + 7); ctx.lineTo(cx + r * 0.7, cy + 8);
+    ctx.stroke();
   } else {
     // Fighter: sword icon
     ctx.fillStyle = '#1a1a2e'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
@@ -560,12 +667,14 @@ function showFighterStats(fid) {
 }
 
 $('#btn-select-fighter').addEventListener('click', () => {
+  // Singleplayer only — pick fighter and start game
+  if (!selectedFighterId) {
+    return; // no fighter picked
+  }
   if (typeof socket !== 'undefined' && socket.emit) {
     socket.emit('change-fighter', { fighterId: selectedFighterId });
   }
-  if (flowTarget === 'host') {
-    socket.emit('host-game', { playerName, mapIndex: selectedMap, fighterId: selectedFighterId });
-  } else if (flowTarget === 'training') {
+  if (flowTarget === 'training') {
     const randomMap = Math.floor(Math.random() * MAPS.length);
     const color = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
     enterGame(randomMap, [{ id: 'local', name: playerName, color, isHost: true, fighterId: selectedFighterId }], 'training');
@@ -573,10 +682,76 @@ $('#btn-select-fighter').addEventListener('click', () => {
     const randomMap = Math.floor(Math.random() * MAPS.length);
     const color = PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
     enterGame(randomMap, [{ id: 'local', name: playerName, color, isHost: true, fighterId: selectedFighterId }], 'fight');
-  } else if (flowTarget === 'join') {
-    showScreen('screen-join');
   }
 });
+
+// ── Lobby fighter selection ───────────────────────────────────
+let lobbyFighterCardShown = null;
+
+function populateLobbyFighters() {
+  const bar = document.querySelector('#lobby-fighter-bar');
+  const card = document.querySelector('#lobby-fighter-card');
+  if (!bar) return;
+  bar.innerHTML = '';
+
+  getAllFighterIds().forEach((fid) => {
+    const f = getFighter(fid);
+    const btn = document.createElement('button');
+    btn.className = 'lobby-fighter-btn' + (fid === selectedFighterId ? ' active' : '');
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 40; canvas.height = 40;
+    drawFighterIcon(canvas, fid, 40);
+    btn.appendChild(canvas);
+
+    const label = document.createElement('span');
+    label.textContent = f.name;
+    btn.appendChild(label);
+
+    btn.addEventListener('click', () => {
+      selectedFighterId = fid;
+      showLobbyFighterStats(fid);
+      lobbyFighterCardShown = fid;
+      bar.querySelectorAll('.lobby-fighter-btn').forEach((b, idx) => {
+        const ids = getAllFighterIds();
+        b.className = 'lobby-fighter-btn' + (ids[idx] === selectedFighterId ? ' active' : '');
+      });
+      // Tell server about fighter change
+      if (typeof socket !== 'undefined' && socket.emit) {
+        socket.emit('change-fighter', { fighterId: selectedFighterId });
+      }
+    });
+    bar.appendChild(btn);
+  });
+}
+
+function showLobbyFighterStats(fid) {
+  const f = getFighter(fid);
+  if (!f) return;
+
+  const el = (sel) => document.querySelector(sel);
+  const card = el('#lobby-fighter-card');
+  card.classList.remove('hidden');
+
+  el('#lfc-name').textContent = f.name;
+  el('#lfc-hp').textContent = 'HP: ' + f.hp;
+  el('#lfc-desc').textContent = f.description;
+  el('#lfc-speed').textContent = f.speed;
+  el('#lfc-heal').textContent = f.healAmount + ' every ' + f.healTick + 's (after ' + f.healDelay + 's)';
+
+  const list = el('#lfc-abilities');
+  list.innerHTML = '';
+  f.abilities.forEach((a) => {
+    const li = document.createElement('li');
+    li.className = 'ability-item';
+    li.innerHTML =
+      `<span class="ability-key">${escapeHtml(a.key)}</span>` +
+      `<div><strong>${escapeHtml(a.name)}</strong>` +
+      `<br><small>${escapeHtml(a.description)}</small>` +
+      `<br><small>DMG: ${a.damage || '—'}  CD: ${a.cooldown || '—'}s</small></div>`;
+    list.appendChild(li);
+  });
+}
 
 // ── Util ─────────────────────────────────────────────────────
 function escapeHtml(str) {

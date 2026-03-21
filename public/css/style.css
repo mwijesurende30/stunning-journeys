@@ -97,7 +97,66 @@ input[type="text"]::placeholder { color: #666; }
 .map-card canvas { display: block; border-radius: 4px; }
 .map-card .map-label { font-size: 0.85rem; margin-top: 4px; color: #aaa; }
 
-/* ── Lobby ────────────────────────────────────────────────── */
+/* ── Lobby ────────────────────────────────────────────────── */.lobby-layout {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+  width: 100%;
+  max-width: 1100px;
+}
+.lobby-left {
+  flex: 0 0 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.lobby-section-title {
+  font-size: 0.9rem;
+  color: #f5a623;
+  text-align: center;
+  margin-bottom: 4px;
+}
+.lobby-fighter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lobby-fighter-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 2px solid #444;
+  border-radius: 8px;
+  background: #16213e;
+  color: #ccc;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.8rem;
+  transition: border-color 0.2s, background 0.2s;
+  white-space: nowrap;
+}
+.lobby-fighter-btn:hover { background: #1a2744; }
+.lobby-fighter-btn.active { border-color: #e94560; color: #fff; background: #2a1530; }
+.lobby-fighter-btn canvas { border-radius: 50%; display: block; flex-shrink: 0; }
+.lobby-center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.lobby-right {
+  flex: 0 0 340px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+#screen-lobby.screen {
+  padding: 16px 24px;
+  gap: 10px;
+}
 .lobby-code-area {
   display: flex;
   align-items: center;
@@ -209,29 +268,49 @@ input[type="text"]::placeholder { color: #666; }
   background: #111;
 }
 
-/* ── Fighters screen ─────────────────────────────────────── */
-.fighter-select-bar {
+/* ── Fighters screen (singleplayer) ───────────────────── */
+.sp-fighter-layout {
   display: flex;
-  gap: 12px;
+  gap: 24px;
+  align-items: flex-start;
+  width: 100%;
+  max-width: 900px;
+}
+.sp-fighter-left {
+  flex: 0 0 480px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+.sp-fighter-right {
+  flex: 1;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+#screen-fighters.screen { gap: 10px; padding: 16px 32px; }
+
+.fighter-select-bar {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
   margin-bottom: 12px;
-  flex-wrap: wrap;
-  justify-content: center;
+  justify-items: center;
 }
 .fighter-select-btn {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 10px 14px;
+  gap: 8px;
+  padding: 14px 16px;
   border: 2px solid #444;
   border-radius: 10px;
   background: #16213e;
   color: #ccc;
   cursor: pointer;
   font-weight: 600;
-  font-size: 0.8rem;
+  font-size: 0.9rem;
   transition: border-color 0.2s, background 0.2s, transform 0.15s;
-  min-width: 80px;
+  width: 100%;
+  min-width: 100px;
 }
 .fighter-select-btn:hover { background: #1a2744; transform: translateY(-2px); }
 .fighter-select-btn.active { border-color: #e94560; color: #fff; background: #2a1530; }
@@ -244,8 +323,8 @@ input[type="text"]::placeholder { color: #666; }
   background: #16213e;
   border-radius: 10px;
   padding: 10px 14px;
-  width: 420px;
-  max-width: 90vw;
+  width: 100%;
+  max-width: 420px;
   transition: max-height 0.3s ease, opacity 0.3s ease, margin 0.3s ease;
   overflow: hidden;
 }

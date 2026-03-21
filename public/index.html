@@ -20,7 +20,6 @@
       <button class="menu-btn primary" id="btn-singleplayer">Singleplayer</button>
       <button class="menu-btn primary" id="btn-host">Host Game</button>
       <button class="menu-btn primary" id="btn-join">Join Game</button>
-      <button class="menu-btn secondary" id="btn-achievements">Achievements</button>
     </div>
   </div>
 
@@ -56,23 +55,50 @@
   <!-- ───── HOST / JOIN: LOBBY ───── -->
   <div id="screen-lobby" class="screen">
     <h2 id="lobby-title">Lobby</h2>
-    <div class="lobby-code-area">
-      <span>Code:</span>
-      <span class="code-display" id="lobby-code">------</span>
-      <button class="copy-btn" id="btn-copy-code" title="Copy code">📋</button>
-    </div>
-    <div class="map-preview-area">
-      <canvas id="lobby-map-preview" width="320" height="240"></canvas>
-      <div id="host-map-controls" class="hidden">
-        <button class="map-arrow" id="btn-prev-map">◀</button>
-        <span id="lobby-map-name">Map 1</span>
-        <button class="map-arrow" id="btn-next-map">▶</button>
+    <div class="lobby-layout">
+      <!-- LEFT: Fighter icons -->
+      <div class="lobby-left">
+        <h3 class="lobby-section-title">Choose Fighter</h3>
+        <div class="lobby-fighter-bar" id="lobby-fighter-bar"></div>
+      </div>
+      <!-- CENTER: Code, map, players -->
+      <div class="lobby-center">
+        <div class="lobby-code-area">
+          <span>Code:</span>
+          <span class="code-display" id="lobby-code">------</span>
+          <button class="copy-btn" id="btn-copy-code" title="Copy code">📋</button>
+        </div>
+        <div class="map-preview-area">
+          <canvas id="lobby-map-preview" width="320" height="240"></canvas>
+          <div id="host-map-controls" class="hidden">
+            <button class="map-arrow" id="btn-prev-map">◀</button>
+            <span id="lobby-map-name">Map 1</span>
+            <button class="map-arrow" id="btn-next-map">▶</button>
+          </div>
+        </div>
+        <div class="color-picker" id="color-picker"></div>
+        <div class="player-list" id="player-list"></div>
+        <button class="menu-btn primary hidden" id="btn-start-game">Start Game</button>
+        <button class="menu-btn secondary" id="btn-leave-lobby">Leave</button>
+      </div>
+      <!-- RIGHT: Fighter description -->
+      <div class="lobby-right">
+        <div class="fighter-card hidden" id="lobby-fighter-card">
+          <div class="fighter-header">
+            <span class="fighter-name" id="lfc-name">Fighter</span>
+            <span class="fighter-hp" id="lfc-hp">HP: 1000</span>
+          </div>
+          <p class="fighter-desc" id="lfc-desc"></p>
+          <div class="fighter-stats" id="lfc-stats">
+            <div class="stat-row"><span>Auto-Heal</span><span id="lfc-heal">100 HP / 30s</span></div>
+            <div class="stat-row"><span>Speed</span><span id="lfc-speed">Normal</span></div>
+          </div>
+          <h3 class="abilities-title">Abilities</h3>
+          <div class="ability-list" id="lfc-abilities"></div>
+          <div class="special-note">⚡ Special unlocks after dealing 2× your max HP in damage without dying</div>
+        </div>
       </div>
     </div>
-    <div class="color-picker" id="color-picker"></div>
-    <div class="player-list" id="player-list"></div>
-    <button class="menu-btn primary hidden" id="btn-start-game">Start Game</button>
-    <button class="menu-btn secondary" id="btn-leave-lobby">Leave</button>
   </div>
 
   <!-- ───── JOIN: ENTER CODE ───── -->
@@ -84,33 +110,34 @@
     <p class="error-msg" id="join-error"></p>
   </div>
 
-  <!-- ───── FIGHTERS ───── -->
+  <!-- ───── FIGHTERS (singleplayer) ───── -->
   <div id="screen-fighters" class="screen">
-    <h2>Fighters</h2>
-    <div class="fighter-select-bar" id="fighter-select-bar"></div>
-    <div class="fighter-card hidden" id="fighter-card">
-      <div class="fighter-header">
-        <span class="fighter-name" id="fc-name">Fighter</span>
-        <span class="fighter-hp" id="fc-hp">HP: 1000</span>
+    <h2>Choose Fighter</h2>
+    <div class="sp-fighter-layout">
+      <!-- LEFT: Fighter icons -->
+      <div class="sp-fighter-left">
+        <div class="fighter-select-bar" id="fighter-select-bar"></div>
       </div>
-      <p class="fighter-desc" id="fc-desc"></p>
-      <div class="fighter-stats" id="fc-stats">
-        <div class="stat-row"><span>Auto-Heal</span><span id="fc-heal">100 HP / 30s</span></div>
-        <div class="stat-row"><span>Speed</span><span id="fc-speed">Normal</span></div>
+      <!-- RIGHT: Fighter description -->
+      <div class="sp-fighter-right">
+        <div class="fighter-card hidden" id="fighter-card">
+          <div class="fighter-header">
+            <span class="fighter-name" id="fc-name">Fighter</span>
+            <span class="fighter-hp" id="fc-hp">HP: 1000</span>
+          </div>
+          <p class="fighter-desc" id="fc-desc"></p>
+          <div class="fighter-stats" id="fc-stats">
+            <div class="stat-row"><span>Auto-Heal</span><span id="fc-heal">100 HP / 30s</span></div>
+            <div class="stat-row"><span>Speed</span><span id="fc-speed">Normal</span></div>
+          </div>
+          <h3 class="abilities-title">Abilities</h3>
+          <div class="ability-list" id="fc-abilities"></div>
+          <div class="special-note">⚡ Special unlocks after dealing 2× your max HP in damage without dying</div>
+        </div>
       </div>
-      <h3 class="abilities-title">Abilities</h3>
-      <div class="ability-list" id="fc-abilities"></div>
-      <div class="special-note">⚡ Special unlocks after dealing 2× your max HP in damage without dying</div>
     </div>
     <button class="menu-btn primary" id="btn-select-fighter">Select Fighter</button>
     <button class="menu-btn secondary" id="btn-fighters-back">Back</button>
-  </div>
-
-  <!-- ───── ACHIEVEMENTS (placeholder) ───── -->
-  <div id="screen-achievements" class="screen">
-    <h2>Achievements</h2>
-    <p class="placeholder-text">Coming soon…</p>
-    <button class="menu-btn secondary" id="btn-achievements-back">Back</button>
   </div>
 
   <!-- ───── GAME CANVAS (shown after start) ───── -->
