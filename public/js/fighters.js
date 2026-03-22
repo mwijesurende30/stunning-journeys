@@ -74,6 +74,18 @@ const FIGHTERS = {
         type: 'special',
         bind: ' ',
       },
+      {
+        key: 'F',
+        name: 'Potion',
+        description: 'Drinks a potion, healing 300 HP over 3 seconds. 3 uses per game.',
+        damage: 0,
+        cooldown: 10,
+        healAmount: 300,
+        healDuration: 3,
+        type: 'self',
+        bind: 'f',
+        requiresAchievement: 'fighterAch',
+      },
     ],
   },
 
@@ -141,6 +153,16 @@ const FIGHTERS = {
         range: 10,
         type: 'special',
         bind: ' ',
+      },
+      {
+        key: 'F',
+        name: 'Full House',
+        description: 'Guarantees that the next move you use will be the best option. 3 uses per game.',
+        damage: 0,
+        cooldown: 10,
+        type: 'self',
+        bind: 'f',
+        requiresAchievement: 'pokerAch',
       },
     ],
   },
@@ -212,6 +234,16 @@ const FIGHTERS = {
         stunDuration: 10,
         type: 'special',
         bind: ' ',
+      },
+      {
+        key: 'F',
+        name: 'Analogus',
+        description: 'Filbus calls for other entities to help him. 3 uses per game.',
+        damage: 0,
+        cooldown: 10,
+        type: 'self',
+        bind: 'f',
+        requiresAchievement: 'filbusAch',
       },
     ],
   },
@@ -286,6 +318,19 @@ const FIGHTERS = {
         zombieDamage: 100,
         zombieSpeed: 2.0,
         baseZombies: 5,
+      },
+      {
+        key: 'F',
+        name: 'Forsakened Help',
+        description: "Spawns c00lkidd who throws red balls at opponents (like Gamble). c00lkidd has 500 HP and a 4-second cooldown. 3 uses per game.",
+        damage: 0,
+        cooldown: 10,
+        summonHp: 500,
+        summonFireCD: 4,
+        projectileSpeed: 30,
+        type: 'summon',
+        bind: 'f',
+        requiresAchievement: 'onexAch',
       },
     ],
   },
@@ -362,6 +407,18 @@ const FIGHTERS = {
         type: 'special',
         bind: ' ',
       },
+      {
+        key: 'F',
+        name: 'Bowler',
+        description: 'Spawns a bowler who sends a fast ball to Cricket to hit back at the closest enemy. Ball base damage 200. Bowler has 300 HP. Bowler CD = 5 seconds. 3 uses per game.',
+        damage: 200,
+        cooldown: 10,
+        summonHp: 300,
+        summonFireCD: 5,
+        type: 'summon',
+        bind: 'f',
+        requiresAchievement: 'cricketAch2',
+      },
     ],
   },
   deer: {
@@ -410,7 +467,7 @@ const FIGHTERS = {
       {
         key: 'T',
         name: "Deer's Spear",
-        description: 'Stabs with antlers for 350 damage. Same range as Cricket. Instantly kills Oddities. Stuns hit players for 3 seconds.',
+        description: 'Stabs with stick for 350 damage. Same range as Cricket. Instantly kills Oddities. Stuns hit players for 3 seconds.',
         damage: 350,
         cooldown: 30,
         range: 1.2,
@@ -432,6 +489,20 @@ const FIGHTERS = {
         cooldown: 0,
         type: 'special',
         bind: ' ',
+      },
+      {
+        key: 'F',
+        name: 'YOU HAVE CRABS',
+        description: 'Spawns 4 crabs with 400 HP. They chase enemies and deal 200 damage on contact with 1-second cooldown. 3 uses per game.',
+        damage: 200,
+        cooldown: 10,
+        crabCount: 4,
+        crabHp: 400,
+        crabSpeed: 2.0,
+        crabAttackCD: 1,
+        type: 'summon',
+        bind: 'f',
+        requiresAchievement: 'deerAch2',
       },
     ],
   },
@@ -508,6 +579,20 @@ const FIGHTERS = {
         type: 'special',
         bind: ' ',
       },
+      {
+        key: 'F',
+        name: 'Forsakened Help',
+        description: 'Spawns John Doe on the map edge. Sends spikes in a straight line. Spikes stay for 5s, hit = 500 dmg, touch = 100 dps. John Doe has 500 HP, 10s cooldown. 3 uses per game.',
+        damage: 500,
+        touchDPS: 100,
+        cooldown: 10,
+        summonHp: 500,
+        summonFireCD: 10,
+        spikeDuration: 5,
+        type: 'summon',
+        bind: 'f',
+        requiresAchievement: 'noliAch2',
+      },
     ],
   },
   explodingcat: {
@@ -574,8 +659,143 @@ const FIGHTERS = {
         type: 'special',
         bind: ' ',
       },
+      {
+        key: 'F',
+        name: 'Unstable Unicorns',
+        description: 'Summon a random unicorn. 3 uses per game.',
+        damage: 0,
+        cooldown: 10,
+        type: 'self',
+        bind: 'f',
+        requiresAchievement: 'catAch2',
+      },
     ],
   },
+};
+
+// ── Fighter unlock system ─────────────────────────────────────
+const FREE_FIGHTERS = ['fighter', 'poker'];
+
+const ACHIEVEMENTS = {
+  firstWin: {
+    id: 'firstWin',
+    name: 'First Victory',
+    description: 'Win a singleplayer fight for the first time.',
+    unlocks: 'filbus',
+  },
+  firstMPWin: {
+    id: 'firstMPWin',
+    name: 'Limited time Superiority',
+    description: 'Win a multiplayer game for the first time.',
+    unlocks: 'onexonexonex',
+  },
+  cricketAch: {
+    id: 'cricketAch',
+    name: 'All-Rounder',
+    description: 'Win 5 multiplayer games and win 3 singleplayer fights.',
+    unlocks: 'cricket',
+  },
+  deerAch: {
+    id: 'deerAch',
+    name: 'Intelligently Lazy',
+    description: 'Kill an opponent with a summon in multiplayer.',
+    unlocks: 'deer',
+  },
+  noliAch: {
+    id: 'noliAch',
+    name: 'Dimensional Mastery',
+    description: 'Win 5 games as 1X1X1X1 and play The Boiled One Phenomenon 3 times.',
+    unlocks: 'noli',
+    requiresFighters: ['onexonexonex', 'filbus'],
+  },
+  catAch: {
+    id: 'catAch',
+    name: 'Deer that is superior.',
+    description: "Win a game as Deer using only M1, Deer's Spear, and IGLOO.",
+    unlocks: 'explodingcat',
+    requiresFighters: ['deer'],
+  },
+  // ── Per-fighter achievements (round 2) ──────────────────────
+  fighterAch: {
+    id: 'fighterAch',
+    name: 'Devastation from Above',
+    description: 'Kill 2 opponents with your special in a single game as Fighter.',
+    forFighter: 'fighter',
+    unlocksMove4: true,
+  },
+  pokerAch: {
+    id: 'pokerAch',
+    name: 'Natural Talent',
+    description: 'Win a game without using your special as Poker.',
+    forFighter: 'poker',
+    unlocksMove4: true,
+  },
+  filbusAch: {
+    id: 'filbusAch',
+    name: "The Scalding Blood Of Life Will Pour Down Onto Us All",
+    description: 'Kill 2 players in the same game with The Boiled One Phenomenon as Filbus.',
+    forFighter: 'filbus',
+    unlocksMove4: true,
+    requiresFighters: ['filbus'],
+  },
+  onexAch: {
+    id: 'onexAch',
+    name: 'Dimensional Hunter',
+    description: 'Kill Noli in multiplayer AND The Exploding Cat in singleplayer as 1X1X1X1.',
+    forFighter: 'onexonexonex',
+    unlocksMove4: true,
+    requiresFighters: ['onexonexonex', 'noli', 'explodingcat'],
+  },
+  cricketAch2: {
+    id: 'cricketAch2',
+    name: 'Defensive Mastery',
+    description: 'Absorb 1000 total damage with Gear Up in singleplayer as Cricket.',
+    forFighter: 'cricket',
+    unlocksMove4: true,
+    requiresFighters: ['cricket'],
+  },
+  deerAch2: {
+    id: 'deerAch2',
+    name: 'YOU HAVE CRABS',
+    description: 'Kill an opponent while next to water as Deer.',
+    forFighter: 'deer',
+    unlocksMove4: true,
+    requiresFighters: ['deer'],
+  },
+  noliAch2: {
+    id: 'noliAch2',
+    name: 'Happy Feet',
+    description: 'Kill 2 entities or players with Void Rush in a single multiplayer game as Noli.',
+    forFighter: 'noli',
+    unlocksMove4: true,
+    requiresFighters: ['noli'],
+  },
+  catAch2: {
+    id: 'catAch2',
+    name: 'No Defuses Left',
+    description: 'Have 2 kittens from your special kill opponents in a single game as The Exploding Cat.',
+    forFighter: 'explodingcat',
+    unlocksMove4: true,
+    requiresFighters: ['explodingcat'],
+  },
+};
+
+// Which progress stats each achievement resets (for others) when completed
+// Category: 'wins' covers mpWins, spWins, winsAs1x
+const ACH_RESET_CATEGORIES = {
+  firstWin:   ['wins'],
+  firstMPWin: ['wins'],
+  cricketAch: ['wins'],
+  deerAch:    ['summonKill'],
+  noliAch:    ['wins', 'boiledOne'],
+  catAch:     ['deerRestricted'],
+};
+
+const PROGRESS_BY_CATEGORY = {
+  wins: ['mpWins', 'spWins', 'winsAs1x'],
+  summonKill: ['summonKillMP'],
+  boiledOne:  ['boiledOnePlays'],
+  deerRestricted: ['deerRestrictedWin'],
 };
 
 function getFighter(id) {
@@ -584,4 +804,8 @@ function getFighter(id) {
 
 function getAllFighterIds() {
   return Object.keys(FIGHTERS);
+}
+
+function isFighterFree(fid) {
+  return FREE_FIGHTERS.includes(fid);
 }

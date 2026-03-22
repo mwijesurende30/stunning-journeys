@@ -20,7 +20,33 @@
       <button class="menu-btn primary" id="btn-singleplayer">Singleplayer</button>
       <button class="menu-btn primary" id="btn-host">Host Game</button>
       <button class="menu-btn primary" id="btn-join">Join Game</button>
+      <button class="menu-btn secondary" id="btn-achievements">🏆 Achievements</button>
     </div>
+  </div>
+
+  <!-- ───── ACHIEVEMENTS SCREEN ───── -->
+  <div id="screen-achievements" class="screen">
+    <h2>🏆 Achievements</h2>
+    <div class="achv-code-area">
+      <p class="achv-label">Your unique code (save this!):</p>
+      <div class="achv-code-display" id="achv-code-display">------</div>
+    </div>
+    <div class="achv-divider"></div>
+    <div class="achv-input-area">
+      <p class="achv-label">Have a code? Enter it to restore progress:</p>
+      <input type="text" id="achv-code-input" maxlength="32" placeholder="Enter code…" autocomplete="off" />
+      <button class="menu-btn primary achv-btn" id="btn-achv-load">Load Code</button>
+      <p class="achv-msg" id="achv-msg"></p>
+    </div>
+    <div class="achv-divider"></div>
+    <div class="achv-list" id="achv-list"></div>
+    <div class="achv-divider"></div>
+    <div class="achv-unlocks">
+      <h3>Fighters</h3>
+      <div class="achv-fighter-grid" id="achv-fighter-grid"></div>
+    </div>
+    <button class="menu-btn secondary" id="btn-achv-logout">Log Out</button>
+    <button class="menu-btn secondary" id="btn-achv-back">Back</button>
   </div>
 
   <!-- ───── SINGLEPLAYER MODE SELECT ───── -->

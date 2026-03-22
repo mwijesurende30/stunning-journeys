@@ -32,6 +32,18 @@ let myColor = '#e94560';
 
 const PLAYER_COLORS = ['#e94560', '#3498db', '#2ecc71', '#f5a623', '#9b59b6'];
 
+// Shuffled fighter order (Fighter & Poker stay at front)
+const _shuffledFighterIds = (() => {
+  const all = getAllFighterIds();
+  const fixed = all.filter(id => id === 'fighter' || id === 'poker');
+  const rest = all.filter(id => id !== 'fighter' && id !== 'poker');
+  for (let i = rest.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [rest[i], rest[j]] = [rest[j], rest[i]];
+  }
+  return [...fixed, ...rest];
+})();
+
 // ── DOM helpers ──────────────────────────────────────────────
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
@@ -597,10 +609,11 @@ function populateFighterScreen() {
   const card = document.querySelector('#fighter-card');
   bar.innerHTML = '';
 
-  getAllFighterIds().forEach((fid) => {
+  _shuffledFighterIds.forEach((fid) => {
     const f = getFighter(fid);
+    const locked = !isFighterUnlocked(fid);
     const btn = document.createElement('button');
-    btn.className = 'fighter-select-btn' + (fid === selectedFighterId ? ' active' : '');
+    btn.className = 'fighter-select-btn' + (fid === selectedFighterId ? ' active' : '') + (locked ? ' locked' : '');
 
     // Draw icon
     const canvas = document.createElement('canvas');
@@ -609,10 +622,11 @@ function populateFighterScreen() {
 
     // Name label
     const label = document.createElement('span');
-    label.textContent = f.name;
+    label.textContent = locked ? '???' : f.name;
     btn.appendChild(label);
 
     btn.addEventListener('click', () => {
+      if (locked) return;
       selectedFighterId = fid;
       if (fighterCardShown === fid) {
         // Clicking same fighter again hides stats
@@ -624,8 +638,8 @@ function populateFighterScreen() {
       }
       // Update active state on all buttons
       bar.querySelectorAll('.fighter-select-btn').forEach((b, idx) => {
-        const ids = getAllFighterIds();
-        b.className = 'fighter-select-btn' + (ids[idx] === selectedFighterId ? ' active' : '');
+        const ids = _shuffledFighterIds;
+        b.className = 'fighter-select-btn' + (ids[idx] === selectedFighterId ? ' active' : '') + (!isFighterUnlocked(ids[idx]) ? ' locked' : '');
       });
     });
     bar.appendChild(btn);
@@ -694,10 +708,11 @@ function populateLobbyFighters() {
   if (!bar) return;
   bar.innerHTML = '';
 
-  getAllFighterIds().forEach((fid) => {
+  _shuffledFighterIds.forEach((fid) => {
     const f = getFighter(fid);
+    const locked = !isFighterUnlocked(fid);
     const btn = document.createElement('button');
-    btn.className = 'lobby-fighter-btn' + (fid === selectedFighterId ? ' active' : '');
+    btn.className = 'lobby-fighter-btn' + (fid === selectedFighterId ? ' active' : '') + (locked ? ' locked' : '');
 
     const canvas = document.createElement('canvas');
     canvas.width = 40; canvas.height = 40;
@@ -705,16 +720,17 @@ function populateLobbyFighters() {
     btn.appendChild(canvas);
 
     const label = document.createElement('span');
-    label.textContent = f.name;
+    label.textContent = locked ? '???' : f.name;
     btn.appendChild(label);
 
     btn.addEventListener('click', () => {
+      if (locked) return;
       selectedFighterId = fid;
       showLobbyFighterStats(fid);
       lobbyFighterCardShown = fid;
       bar.querySelectorAll('.lobby-fighter-btn').forEach((b, idx) => {
-        const ids = getAllFighterIds();
-        b.className = 'lobby-fighter-btn' + (ids[idx] === selectedFighterId ? ' active' : '');
+        const ids = _shuffledFighterIds;
+        b.className = 'lobby-fighter-btn' + (ids[idx] === selectedFighterId ? ' active' : '') + (!isFighterUnlocked(ids[idx]) ? ' locked' : '');
       });
       // Tell server about fighter change
       if (typeof socket !== 'undefined' && socket.emit) {
@@ -758,4 +774,565 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.appendChild(document.createTextNode(str));
   return div.innerHTML;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ACHIEVEMENT / UNLOCK SYSTEM
+// ═══════════════════════════════════════════════════════════════
+/*
+  Achievement state = completed set + progress counters.
+  Encoded into an alphanumeric code the player can save/restore.
+*/
+
+// ── Encode / Decode achievement codes ────────────────────────
+const _ACH_KEY = 'rbg_achievements'; // localStorage key
+
+const _OLD_PROGRESS_KEYS = ['mpWins', 'spWins', 'winsAs1x', 'boiledOnePlays', 'summonKillMP', 'deerRestrictedWin'];
+const _PROGRESS_KEYS = [
+  'mpWins', 'spWins', 'winsAs1x', 'boiledOnePlays', 'summonKillMP', 'deerRestrictedWin',
+  // Round 2 per-fighter progress
+  'fighterSpecialAch', 'pokerNoSpecialAch', 'filbusBoiledKillAch',
+  'onexKilledNoliMP', 'onexKilledCatSP', 'gearDmgAbsorbed',
+  'deerWaterKill', 'noliVoidRushAch', 'catKittenAch',
+];
+
+function _defaultProgress() {
+  const p = {};
+  _PROGRESS_KEYS.forEach(k => { p[k] = 0; });
+  return p;
+}
+
+function _achStateToBits(completed) {
+  const ids = Object.keys(ACHIEVEMENTS);
+  let bits = 0;
+  ids.forEach((id, i) => { if (completed.has(id)) bits |= (1 << i); });
+  return bits;
+}
+
+function _achBitsToState(bits) {
+  const ids = Object.keys(ACHIEVEMENTS);
+  const set = new Set();
+  ids.forEach((id, i) => { if (bits & (1 << i)) set.add(id); });
+  return set;
+}
+
+// Pack state into bytes: [achBitsLow, achBitsHigh, ...progressKeys]
+function _packState(completed, progress) {
+  const bytes = [];
+  const bits = _achStateToBits(completed);
+  bytes.push(bits & 0xFF);
+  bytes.push((bits >> 8) & 0xFF);
+  _PROGRESS_KEYS.forEach(k => bytes.push(Math.min(255, Math.max(0, progress[k] || 0))));
+  return bytes;
+}
+
+function _unpackState(bytes) {
+  // New format: 2 ach bytes + full progress keys
+  const newLen = 2 + _PROGRESS_KEYS.length;
+  if (bytes.length >= newLen) {
+    const bits = bytes[0] | (bytes[1] << 8);
+    const completed = _achBitsToState(bits);
+    const progress = _defaultProgress();
+    _PROGRESS_KEYS.forEach((k, i) => { progress[k] = bytes[2 + i]; });
+    return { completed, progress };
+  }
+  // Old format: 1 ach byte + 6 old progress keys
+  const oldLen = 1 + _OLD_PROGRESS_KEYS.length;
+  if (bytes.length >= oldLen) {
+    const completed = _achBitsToState(bytes[0]);
+    const progress = _defaultProgress();
+    _OLD_PROGRESS_KEYS.forEach((k, i) => { progress[k] = bytes[1 + i]; });
+    return { completed, progress };
+  }
+  return null;
+}
+
+// Code format: SALT-PAYLOAD  (SALT=4 chars derived from data, PAYLOAD=hex bytes XOR'd with salt)
+function generateAchCode(completed, progress) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = _packState(completed, progress);
+  // Derive salt deterministically from data so same state = same code
+  let hash = 0;
+  for (let i = 0; i < bytes.length; i++) hash = ((hash * 31 + bytes[i] + 7) * 17) & 0xFFFFFFFF;
+  let saltStr = '';
+  let salt = 0;
+  for (let i = 0; i < 4; i++) {
+    const c = chars[((hash >>> (i * 8)) & 0xFF) % chars.length];
+    saltStr += c;
+    salt = (salt * 33 + c.charCodeAt(0)) & 0xFFFF;
+  }
+  const xorKey = salt & 0xFF;
+  const hex = bytes.map(b => ((b ^ xorKey) & 0xFF).toString(16).padStart(2, '0')).join('');
+  return saltStr + '-' + hex.toUpperCase();
+}
+
+function decodeAchCode(code) {
+  if (!code || typeof code !== 'string') return null;
+  code = code.trim().toUpperCase();
+  if (code === 'NAPOLEON') {
+    return { completed: new Set(Object.keys(ACHIEVEMENTS)), progress: _defaultProgress(), unlockAll: true };
+  }
+  const parts = code.split('-');
+  if (parts.length !== 2 || parts[0].length !== 4) return null;
+  const saltStr = parts[0];
+  let salt = 0;
+  for (let i = 0; i < 4; i++) {
+    salt = (salt * 33 + saltStr.charCodeAt(i)) & 0xFFFF;
+  }
+  const hex = parts[1];
+  if (hex.length % 2 !== 0) return null;
+  const xorKey = salt & 0xFF;
+  const bytes = [];
+  for (let i = 0; i < hex.length; i += 2) {
+    const b = parseInt(hex.substring(i, i + 2), 16);
+    if (isNaN(b)) return null;
+    bytes.push((b ^ xorKey) & 0xFF);
+  }
+  const state = _unpackState(bytes);
+  if (!state) return null;
+  return { completed: state.completed, progress: state.progress, unlockAll: false };
+}
+
+// ── Persistent state ─────────────────────────────────────────
+let completedAchievements = new Set();
+let achProgress = _defaultProgress();
+let allFightersUnlocked = false;
+
+function loadAchievements() {
+  try {
+    const saved = localStorage.getItem(_ACH_KEY);
+    if (saved) {
+      const decoded = decodeAchCode(saved);
+      if (decoded) {
+        if (decoded.unlockAll) allFightersUnlocked = true;
+        completedAchievements = decoded.completed;
+        achProgress = decoded.progress;
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function saveAchievements() {
+  try {
+    if (allFightersUnlocked) {
+      localStorage.setItem(_ACH_KEY, 'NAPOLEON');
+    } else {
+      const code = generateAchCode(completedAchievements, achProgress);
+      localStorage.setItem(_ACH_KEY, code);
+    }
+  } catch (e) { /* ignore */ }
+}
+
+// ── Achievement checking with reset logic ────────────────────
+function _resetCategoriesFor(achId) {
+  const cats = ACH_RESET_CATEGORIES[achId] || [];
+  cats.forEach(cat => {
+    const stats = PROGRESS_BY_CATEGORY[cat] || [];
+    stats.forEach(s => { achProgress[s] = 0; });
+  });
+}
+
+function _showMove4Toast(ach) {
+  const fighter = getFighter(ach.forFighter);
+  const fName = fighter ? fighter.name : ach.forFighter;
+  const el = document.createElement('div');
+  el.style.cssText = 'position:fixed;top:80px;left:50%;transform:translateX(-50%);z-index:9999;' +
+    'background:linear-gradient(135deg,#1a1a2e,#16213e);color:#f5a623;padding:14px 28px;' +
+    'border-radius:10px;font-family:monospace;font-size:16px;font-weight:bold;text-align:center;' +
+    'border:2px solid #f5a623;box-shadow:0 0 20px rgba(245,166,35,0.4);' +
+    'opacity:0;transition:opacity 0.4s;pointer-events:none;';
+  el.innerHTML = '🔓 Move 4 Unlocked!<br><span style="font-size:13px;color:#ccc;">' +
+    escapeHtml(fName) + ' — ' + escapeHtml(ach.name) + '</span>';
+  document.body.appendChild(el);
+  requestAnimationFrame(() => { el.style.opacity = '1'; });
+  setTimeout(() => {
+    el.style.opacity = '0';
+    setTimeout(() => el.remove(), 500);
+  }, 4000);
+}
+
+function checkAndUnlockAchievements() {
+  let changed = false;
+  const newlyCompleted = [];
+
+  // firstWin: any SP win (tracked separately)
+  if (!completedAchievements.has('firstWin') && achProgress.spWins >= 1) {
+    completedAchievements.add('firstWin');
+    _resetCategoriesFor('firstWin');
+    changed = true;
+  }
+  // firstMPWin: any MP win
+  if (!completedAchievements.has('firstMPWin') && achProgress.mpWins >= 1) {
+    completedAchievements.add('firstMPWin');
+    _resetCategoriesFor('firstMPWin');
+    changed = true;
+  }
+  // cricketAch: 5 MP wins AND 3 SP wins
+  if (!completedAchievements.has('cricketAch') && achProgress.mpWins >= 5 && achProgress.spWins >= 3) {
+    completedAchievements.add('cricketAch');
+    _resetCategoriesFor('cricketAch');
+    changed = true;
+  }
+  // deerAch: kill with summon in MP
+  if (!completedAchievements.has('deerAch') && achProgress.summonKillMP >= 1) {
+    completedAchievements.add('deerAch');
+    _resetCategoriesFor('deerAch');
+    changed = true;
+  }
+  // noliAch: 5 wins as 1X AND 3 boiled one plays (requires 1X + Filbus unlocked)
+  if (!completedAchievements.has('noliAch') && isAchievementAvailable('noliAch') && achProgress.winsAs1x >= 5 && achProgress.boiledOnePlays >= 3) {
+    completedAchievements.add('noliAch');
+    _resetCategoriesFor('noliAch');
+    changed = true;
+  }
+  // catAch: deer restricted win (requires Deer unlocked)
+  if (!completedAchievements.has('catAch') && isAchievementAvailable('catAch') && achProgress.deerRestrictedWin >= 1) {
+    completedAchievements.add('catAch');
+    _resetCategoriesFor('catAch');
+    changed = true;
+  }
+
+  // ── Round 2 per-fighter achievements ──
+  if (!completedAchievements.has('fighterAch') && achProgress.fighterSpecialAch >= 1) {
+    completedAchievements.add('fighterAch');
+    newlyCompleted.push('fighterAch');
+    changed = true;
+  }
+  if (!completedAchievements.has('pokerAch') && achProgress.pokerNoSpecialAch >= 1) {
+    completedAchievements.add('pokerAch');
+    newlyCompleted.push('pokerAch');
+    changed = true;
+  }
+  if (!completedAchievements.has('filbusAch') && isAchievementAvailable('filbusAch') && achProgress.filbusBoiledKillAch >= 1) {
+    completedAchievements.add('filbusAch');
+    newlyCompleted.push('filbusAch');
+    changed = true;
+  }
+  if (!completedAchievements.has('onexAch') && isAchievementAvailable('onexAch') && achProgress.onexKilledNoliMP >= 1 && achProgress.onexKilledCatSP >= 1) {
+    completedAchievements.add('onexAch');
+    newlyCompleted.push('onexAch');
+    changed = true;
+  }
+  if (!completedAchievements.has('cricketAch2') && isAchievementAvailable('cricketAch2') && achProgress.gearDmgAbsorbed >= 100) {
+    completedAchievements.add('cricketAch2');
+    newlyCompleted.push('cricketAch2');
+    changed = true;
+  }
+  if (!completedAchievements.has('deerAch2') && isAchievementAvailable('deerAch2') && achProgress.deerWaterKill >= 1) {
+    completedAchievements.add('deerAch2');
+    newlyCompleted.push('deerAch2');
+    changed = true;
+  }
+  if (!completedAchievements.has('noliAch2') && isAchievementAvailable('noliAch2') && achProgress.noliVoidRushAch >= 1) {
+    completedAchievements.add('noliAch2');
+    newlyCompleted.push('noliAch2');
+    changed = true;
+  }
+  if (!completedAchievements.has('catAch2') && isAchievementAvailable('catAch2') && achProgress.catKittenAch >= 1) {
+    completedAchievements.add('catAch2');
+    newlyCompleted.push('catAch2');
+    changed = true;
+  }
+
+  if (changed) {
+    saveAchievements();
+    // Show Move 4 unlock toast for newly completed Move 4 achievements
+    for (const achId of newlyCompleted) {
+      const ach = ACHIEVEMENTS[achId];
+      if (ach && ach.unlocksMove4 && ach.forFighter) {
+        _showMove4Toast(ach);
+      }
+    }
+  }
+  return changed;
+}
+
+// ── Public tracking API (called from game.js) ────────────────
+function trackSPWin(fighterId) {
+  achProgress.spWins++;
+  if (fighterId === 'onexonexonex' && isAchievementAvailable('noliAch')) achProgress.winsAs1x++;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackMPWin(fighterId) {
+  achProgress.mpWins++;
+  if (fighterId === 'onexonexonex' && isAchievementAvailable('noliAch')) achProgress.winsAs1x++;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackSummonKillMP() {
+  achProgress.summonKillMP = 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackBoiledOnePlayed() {
+  if (!isAchievementAvailable('noliAch')) return;
+  achProgress.boiledOnePlays++;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackDeerRestrictedWin() {
+  if (!isAchievementAvailable('catAch')) return;
+  achProgress.deerRestrictedWin = 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+// ── Round 2 tracking API (called from game.js) ───────────────
+function trackFighterSpecialAch() {
+  achProgress.fighterSpecialAch = 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackPokerNoSpecialWin() {
+  achProgress.pokerNoSpecialAch = 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackFilbusOddityKill() {
+  // Legacy function (no longer used for achievement)
+}
+
+function trackFilbusBoiledKill() {
+  if (!isAchievementAvailable('filbusAch')) return;
+  achProgress.filbusBoiledKillAch = 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackOnexKilledNoliMP() {
+  if (!isAchievementAvailable('onexAch')) return;
+  achProgress.onexKilledNoliMP = 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackOnexKilledCatSP() {
+  if (!isAchievementAvailable('onexAch')) return;
+  achProgress.onexKilledCatSP = 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackGearDmgAbsorbed(amount) {
+  if (!isAchievementAvailable('cricketAch2')) return;
+  // Store in units of 10 (byte max 255 = 2550 damage)
+  const toAdd = Math.floor(amount / 10);
+  if (toAdd > 0) {
+    achProgress.gearDmgAbsorbed = Math.min(255, achProgress.gearDmgAbsorbed + toAdd);
+    checkAndUnlockAchievements();
+    saveAchievements();
+  }
+}
+
+function trackDeerWaterKill() {
+  if (!isAchievementAvailable('deerAch2')) return;
+  achProgress.deerWaterKill = 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackNoliVoidRushAch() {
+  if (!isAchievementAvailable('noliAch2')) return;
+  achProgress.noliVoidRushAch = 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function trackCatKittenAch() {
+  if (!isAchievementAvailable('catAch2')) return;
+  achProgress.catKittenAch = 1;
+  checkAndUnlockAchievements();
+  saveAchievements();
+}
+
+function unlockAchievement(achId) {
+  if (completedAchievements.has(achId)) return;
+  completedAchievements.add(achId);
+  _resetCategoriesFor(achId);
+  saveAchievements();
+}
+
+function isFighterUnlocked(fid) {
+  if (allFightersUnlocked) return true;
+  if (isFighterFree(fid)) return true;
+  for (const achId of completedAchievements) {
+    const ach = ACHIEVEMENTS[achId];
+    if (ach && ach.unlocks === fid) return true;
+  }
+  return false;
+}
+
+function isAchievementAvailable(achId) {
+  const ach = ACHIEVEMENTS[achId];
+  if (!ach || !ach.requiresFighters) return true;
+  return ach.requiresFighters.every(fid => isFighterUnlocked(fid));
+}
+
+function isMove4Unlocked(fighterId) {
+  if (allFightersUnlocked) return true;
+  for (const achId of completedAchievements) {
+    const ach = ACHIEVEMENTS[achId];
+    if (ach && ach.unlocksMove4 && ach.forFighter === fighterId) return true;
+  }
+  return false;
+}
+
+// Load on startup
+loadAchievements();
+
+// If the currently selected fighter is locked, reset to 'fighter'
+if (!isFighterUnlocked(selectedFighterId)) {
+  selectedFighterId = 'fighter';
+}
+
+// ── Achievements screen ──────────────────────────────────────
+$('#btn-achievements').addEventListener('click', () => {
+  renderAchievementsScreen();
+  showScreen('screen-achievements');
+});
+$('#btn-achv-back').addEventListener('click', () => showScreen('screen-start'));
+$('#btn-achv-logout').addEventListener('click', () => {
+  try { localStorage.removeItem(_ACH_KEY); } catch (e) { /* ignore */ }
+  completedAchievements = new Set();
+  achProgress = _defaultProgress();
+  allFightersUnlocked = false;
+  selectedFighterId = 'fighter';
+  renderAchievementsScreen();
+  const msg = $('#achv-msg');
+  msg.textContent = 'Logged out. Save your code before leaving!';
+  msg.className = 'achv-msg success';
+});
+
+$('#btn-achv-load').addEventListener('click', loadAchievementCode);
+$('#achv-code-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') loadAchievementCode(); });
+
+function _getProgressText(achId) {
+  const p = achProgress;
+  switch (achId) {
+    case 'firstWin': return p.spWins >= 1 ? '' : 'SP wins: ' + p.spWins + '/1';
+    case 'firstMPWin': return p.mpWins >= 1 ? '' : 'MP wins: ' + p.mpWins + '/1';
+    case 'cricketAch': return 'MP wins: ' + Math.min(p.mpWins, 5) + '/5 · SP wins: ' + Math.min(p.spWins, 3) + '/3';
+    case 'deerAch': return p.summonKillMP ? '' : 'Summon kills: 0/1';
+    case 'noliAch': return '1X wins: ' + Math.min(p.winsAs1x, 5) + '/5 · Boiled One: ' + Math.min(p.boiledOnePlays, 3) + '/3';
+    case 'catAch': return p.deerRestrictedWin ? '' : 'Not yet completed';
+    // Round 2
+    case 'fighterAch': return p.fighterSpecialAch ? '' : 'Not yet completed';
+    case 'pokerAch': return p.pokerNoSpecialAch ? '' : 'Not yet completed';
+    case 'filbusAch': return p.filbusBoiledKillAch ? '' : 'Not yet completed';
+    case 'onexAch': return 'Noli (MP): ' + (p.onexKilledNoliMP ? '✓' : '✗') + ' · Cat (SP): ' + (p.onexKilledCatSP ? '✓' : '✗');
+    case 'cricketAch2': return 'Absorbed: ' + Math.min(p.gearDmgAbsorbed * 10, 1000) + '/1000';
+    case 'deerAch2': return p.deerWaterKill ? '' : 'Not yet completed';
+    case 'noliAch2': return p.noliVoidRushAch ? '' : 'Not yet completed';
+    case 'catAch2': return p.catKittenAch ? '' : 'Not yet completed';
+    default: return '';
+  }
+}
+
+function loadAchievementCode() {
+  const code = $('#achv-code-input').value.trim();
+  const msg = $('#achv-msg');
+  if (!code) {
+    msg.textContent = 'Please enter a code.';
+    msg.className = 'achv-msg error';
+    return;
+  }
+  const decoded = decodeAchCode(code);
+  if (!decoded) {
+    msg.textContent = 'Invalid code. Check and try again.';
+    msg.className = 'achv-msg error';
+    return;
+  }
+  // Merge achievements and progress (take max of each counter)
+  if (decoded.unlockAll) {
+    allFightersUnlocked = true;
+  }
+  for (const id of decoded.completed) completedAchievements.add(id);
+  _PROGRESS_KEYS.forEach(k => {
+    achProgress[k] = Math.max(achProgress[k] || 0, decoded.progress[k] || 0);
+  });
+  saveAchievements();
+  msg.textContent = 'Code loaded! Achievements restored.';
+  msg.className = 'achv-msg success';
+  renderAchievementsScreen();
+}
+
+function renderAchievementsScreen() {
+  // Show the saved code (same one stored in localStorage)
+  let displayCode;
+  try { displayCode = localStorage.getItem(_ACH_KEY); } catch (e) { /* ignore */ }
+  if (!displayCode) {
+    saveAchievements();
+    try { displayCode = localStorage.getItem(_ACH_KEY); } catch (e) { /* ignore */ }
+  }
+  $('#achv-code-display').textContent = displayCode || '------';
+
+  // Achievement list
+  const list = $('#achv-list');
+  list.innerHTML = '';
+  Object.values(ACHIEVEMENTS).forEach((ach) => {
+    const done = completedAchievements.has(ach.id);
+    // Move 4 achievements are completely hidden until completed (surprise reward)
+    if (ach.unlocksMove4 && !done) return;
+    const available = isAchievementAvailable(ach.id);
+    const item = document.createElement('div');
+    item.className = 'achv-item' + (done ? ' done' : '') + (!available ? ' unavailable' : '');
+    if (!available) {
+      // Show as hidden/unavailable — required fighters not unlocked
+      const neededNames = (ach.requiresFighters || []).filter(f => !isFighterUnlocked(f)).map(f => getFighter(f).name);
+      item.innerHTML =
+        `<div class="achv-header">` +
+          `<span class="achv-icon">❓</span>` +
+          `<div class="achv-name">???</div>` +
+          `<span class="achv-status locked">HIDDEN</span>` +
+        `</div>` +
+        `<div class="achv-details">` +
+          `<div class="achv-desc">Unlock ${escapeHtml(neededNames.join(' & '))} first.</div>` +
+        `</div>`;
+    } else {
+      let progressText = '';
+      if (!done) progressText = _getProgressText(ach.id);
+      item.innerHTML =
+        `<div class="achv-header">` +
+          `<span class="achv-icon">${done ? '✅' : '🔒'}</span>` +
+          `<div class="achv-name">${escapeHtml(ach.name)}</div>` +
+          `<span class="achv-status ${done ? 'done' : 'locked'}">${done ? 'DONE' : 'LOCKED'}</span>` +
+        `</div>` +
+        `<div class="achv-details">` +
+          `<div class="achv-desc">${escapeHtml(ach.description)}</div>` +
+          (progressText ? `<div class="achv-progress">${escapeHtml(progressText)}</div>` : '') +
+        `</div>`;
+    }
+    // Collapsible: toggle details on header click
+    const header = item.querySelector('.achv-header');
+    header.style.cursor = 'pointer';
+    header.addEventListener('click', () => {
+      item.classList.toggle('expanded');
+    });
+    list.appendChild(item);
+  });
+
+  // Fighters grid
+  const grid = $('#achv-fighter-grid');
+  grid.innerHTML = '';
+  _shuffledFighterIds.forEach((fid) => {
+    if (isFighterFree(fid)) return; // skip free fighters
+    const f = getFighter(fid);
+    const unlocked = isFighterUnlocked(fid);
+    const chip = document.createElement('div');
+    chip.className = 'achv-fighter-chip ' + (unlocked ? 'unlocked' : 'locked');
+    const canvas = document.createElement('canvas');
+    drawFighterIcon(canvas, fid, 28);
+    chip.appendChild(canvas);
+    const name = document.createElement('span');
+    name.textContent = unlocked ? f.name : 'Locked';
+    chip.appendChild(name);
+    grid.appendChild(chip);
+  });
 }
